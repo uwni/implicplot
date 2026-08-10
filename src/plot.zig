@@ -1,0 +1,393 @@
+//! The plotter: a quadtree over the *pixel grid*, evaluated four boxes at a
+//! time, run in parallel over horizontal strips.
+//!
+//! ## Boxes are integer pixel rectangles
+//!
+//! The original subdivided the coordinate *domain* by repeated halving and then
+//! converted the resulting floating-point rectangle back to pixel indices with
+//! a truncate on one edge and a ceil on the other. Unless the image size was a
+//! power of two the cells never lined up with pixels, so a box could bleed into
+//! its neighbours, and the conversion itself was an unchecked `@intFromFloat`
+//! on an unclamped value.
+//!
+//! Here a box is `[x0, x1) x [y0, y1)` in pixel indices. Splitting is integer
+//! arithmetic, painting is an exact `Raster.fill`, and the interval handed to
+//! the evaluator is derived from the indices rather than the other way round.
+//!
+//! ## Parallelism
+//!
+//! Rows are partitioned into strips, one task per strip via `std.Io.Group`.
+//! `Raster` gives every row its own bytes, so tasks owning disjoint row ranges
+//! never touch the same memory.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const Io = std.Io;
+
+const interval = @import("interval.zig");
+const relation = @import("relation.zig");
+const Raster = @import("raster.zig").Raster;
+
+const Tri = interval.Tri;
+const Relation = relation.Relation;
+const Reading = relation.Reading;
+const Rect = relation.Rect;
+
+/// The mapping between pixel indices and the plane.
+pub const View = struct {
+    width: u32,
+    height: u32,
+    x_min: f64 = -10,
+    x_max: f64 = 10,
+    y_min: f64 = -10,
+    y_max: f64 = 10,
+
+    /// x coordinate of the left edge of pixel column `px`.
+    pub fn xAt(self: View, px: u32) f64 {
+        const t = @as(f64, @floatFromInt(px)) / @as(f64, @floatFromInt(self.width));
+        return self.x_min + (self.x_max - self.x_min) * t;
+    }
+
+    /// y coordinate of the top edge of pixel row `py`. Rows run downwards, so
+    /// row 0 is `y_max`.
+    pub fn yAt(self: View, py: u32) f64 {
+        const t = @as(f64, @floatFromInt(py)) / @as(f64, @floatFromInt(self.height));
+        return self.y_max - (self.y_max - self.y_min) * t;
+    }
+};
+
+pub const Options = struct {
+    view: View,
+    /// How many times a single undecided pixel may be split before giving up.
+    ///
+    /// The original used an absolute width of 1e-5 regardless of the plot
+    /// scale, which is both meaningless at a different zoom and, at four-way
+    /// recursion, up to 4^14 evaluations for one pixel.
+    subpixel_depth: u8 = 8,
+    /// Number of row strips; 0 picks a multiple of the CPU count so that the
+    /// (very unevenly distributed) work balances.
+    tasks: u32 = 0,
+    progress: std.Progress.Node = .none,
+};
+
+pub const Box = struct {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+
+    pub fn cols(self: Box) u32 {
+        return self.x1 - self.x0;
+    }
+    pub fn rows(self: Box) u32 {
+        return self.y1 - self.y0;
+    }
+    pub fn isPixel(self: Box) bool {
+        return self.cols() == 1 and self.rows() == 1;
+    }
+
+    /// Split into two or four children, whichever the box's shape allows.
+    pub fn split(self: Box, out: *[4]Box) u8 {
+        const xm = self.x0 + self.cols() / 2;
+        const ym = self.y0 + self.rows() / 2;
+        if (self.cols() > 1 and self.rows() > 1) {
+            out[0] = .{ .x0 = self.x0, .y0 = self.y0, .x1 = xm, .y1 = ym };
+            out[1] = .{ .x0 = xm, .y0 = self.y0, .x1 = self.x1, .y1 = ym };
+            out[2] = .{ .x0 = self.x0, .y0 = ym, .x1 = xm, .y1 = self.y1 };
+            out[3] = .{ .x0 = xm, .y0 = ym, .x1 = self.x1, .y1 = self.y1 };
+            return 4;
+        }
+        if (self.cols() > 1) {
+            out[0] = .{ .x0 = self.x0, .y0 = self.y0, .x1 = xm, .y1 = self.y1 };
+            out[1] = .{ .x0 = xm, .y0 = self.y0, .x1 = self.x1, .y1 = self.y1 };
+            return 2;
+        }
+        out[0] = .{ .x0 = self.x0, .y0 = self.y0, .x1 = self.x1, .y1 = ym };
+        out[1] = .{ .x0 = self.x0, .y0 = ym, .x1 = self.x1, .y1 = self.y1 };
+        return 2;
+    }
+};
+
+/// One strip of rows, plus the scratch needed to work on it. Everything a task
+/// allocates is allocated here, before the group starts.
+const Worker = struct {
+    prober: relation.Prober,
+    raster: Raster,
+    view: View,
+    depth: u8,
+    strip: Box,
+    progress: std.Progress.Node,
+
+    fn run(self: *Worker) void {
+        const r = self.prober.probe(.{self.rectOf(self.strip)} ** 4)[0];
+        self.visit(self.strip, r);
+        self.progress.completeOne();
+    }
+
+    /// The pixel rectangle's footprint in the plane. Rows run downwards, so the
+    /// bottom edge of the box is the larger row index.
+    fn rectOf(self: *const Worker, box: Box) Rect {
+        return .{
+            .x0 = self.view.xAt(box.x0),
+            .x1 = self.view.xAt(box.x1),
+            .y0 = self.view.yAt(box.y1),
+            .y1 = self.view.yAt(box.y0),
+        };
+    }
+
+    fn visit(self: *Worker, box: Box, r: Reading) void {
+        if (r.tri == .false) return;
+
+        if (box.isPixel()) {
+            if (r.tri == .true or self.refine(self.rectOf(box), r, self.depth)) {
+                self.raster.set(box.x0, box.y0);
+            }
+            return;
+        }
+
+        // A `true` verdict may only be painted wholesale if the relation is
+        // defined across the entire box; otherwise the undefined part has to be
+        // resolved by subdividing.
+        if (r.tri == .true and r.dec.isDefined()) {
+            self.raster.fill(box.x0, box.y0, box.x1, box.y1);
+            return;
+        }
+
+        var children: [4]Box = undefined;
+        const n = box.split(&children);
+        var rects: [4]Rect = undefined;
+        for (&rects, 0..) |*rect, i| rect.* = self.rectOf(children[@min(i, n - 1)]);
+
+        const readings = self.prober.probe(rects);
+        for (children[0..n], readings[0..n]) |child, reading| self.visit(child, reading);
+    }
+
+    /// Below one pixel there is no grid left to index, so refinement falls back
+    /// to bisecting the rectangle - but with a bounded depth.
+    fn refine(self: *Worker, rect: Rect, r: Reading, depth: u8) bool {
+        if (self.prober.hasSolution(rect, r)) return true;
+        if (depth == 0) return false;
+
+        const quarters = rect.quarters();
+        const readings = self.prober.probe(quarters);
+        for (quarters, readings) |quarter, reading| {
+            switch (reading.tri) {
+                .true => return true,
+                .false => {},
+                .unknown => if (self.refine(quarter, reading, depth - 1)) return true,
+            }
+        }
+        return false;
+    }
+};
+
+/// Render `rel` into a fresh raster. Caller owns the result.
+///
+/// `io` is where the row strips run. Passing `null` renders inline on the
+/// calling thread - plotting is pure computation, so an environment without
+/// threads (a freestanding wasm plugin, say) should not have to invent an `Io`
+/// implementation just to satisfy a signature.
+pub fn render(gpa: std.mem.Allocator, io: ?Io, rel: *const Relation, opts: Options) !Raster {
+    const view = opts.view;
+    // An inverted or degenerate range would hand the evaluator intervals with
+    // `lo > hi`, which every operation in `interval.zig` assumes cannot happen.
+    // The failure is silent - a blank or mirrored image - so it is a contract,
+    // not a hint. The CLI checks the same thing earlier to report it kindly.
+    std.debug.assert(view.width > 0 and view.height > 0);
+    std.debug.assert(view.x_min < view.x_max and view.y_min < view.y_max);
+
+    var raster = try Raster.init(gpa, view.width, view.height);
+    errdefer raster.deinit(gpa);
+
+    const requested: u32 = if (io == null) 1 else if (opts.tasks != 0) opts.tasks else defaultTasks();
+    const task_count = @max(1, @min(view.height, requested));
+
+    const workers = try gpa.alloc(Worker, task_count);
+    defer gpa.free(workers);
+
+    const node = opts.progress.start("strips", task_count);
+    defer node.end();
+
+    var made: usize = 0;
+    errdefer for (workers[0..made]) |*w| w.prober.deinit(gpa);
+    while (made < task_count) : (made += 1) {
+        const y0: u32 = @intCast(@as(u64, view.height) * made / task_count);
+        const y1: u32 = @intCast(@as(u64, view.height) * (made + 1) / task_count);
+        workers[made] = .{
+            .prober = try .init(gpa, rel),
+            .raster = raster,
+            .view = view,
+            .depth = opts.subpixel_depth,
+            .strip = .{ .x0 = 0, .y0 = y0, .x1 = view.width, .y1 = y1 },
+            .progress = node,
+        };
+    }
+    defer for (workers) |*w| w.prober.deinit(gpa);
+
+    if (io) |runner| {
+        var group: Io.Group = .init;
+        defer group.cancel(runner);
+        for (workers) |*w| group.async(runner, Worker.run, .{w});
+        try group.await(runner);
+    } else {
+        for (workers) |*w| w.run();
+    }
+
+    return raster;
+}
+
+fn defaultTasks() u32 {
+    // `builtin.single_threaded` is comptime, so on a freestanding wasm build
+    // `std.Thread` is never even analysed.
+    if (builtin.single_threaded) return 1;
+    const cpus = std.Thread.getCpuCount() catch 4;
+    return @intCast(@min(cpus * 8, 256));
+}
+
+const testing = std.testing;
+const expr = @import("expr.zig");
+
+fn testRelation(op: interval.Op, comptime f: fn (*expr.Builder) anyerror!expr.Index) !Relation {
+    var b = expr.Builder.init(testing.allocator);
+    defer b.deinit();
+    const root = try f(&b);
+    return .{ .program = try b.build(), .root = root, .op = op };
+}
+
+test "box splitting tiles the parent exactly, for any size" {
+    for ([_]u32{ 1, 2, 3, 5, 7, 8, 13, 64 }) |w| {
+        for ([_]u32{ 1, 2, 3, 5, 9, 16 }) |h| {
+            const box: Box = .{ .x0 = 0, .y0 = 0, .x1 = w, .y1 = h };
+            if (box.isPixel()) continue;
+            var children: [4]Box = undefined;
+            const n = box.split(&children);
+            var area: u32 = 0;
+            for (children[0..n]) |c| {
+                try testing.expect(c.x1 > c.x0 and c.y1 > c.y0);
+                try testing.expect(c.x0 >= box.x0 and c.x1 <= box.x1);
+                try testing.expect(c.y0 >= box.y0 and c.y1 <= box.y1);
+                area += c.cols() * c.rows();
+            }
+            try testing.expectEqual(w * h, area);
+        }
+    }
+}
+
+test "half plane renders exactly, at a non power of two size" {
+    // x < 0 over [-1, 1]^2. Every pixel strictly left of centre is filled,
+    // every pixel strictly right of it is not.
+    var rel = try testRelation(.lt, struct {
+        fn f(b: *expr.Builder) !expr.Index {
+            return b.x();
+        }
+    }.f);
+    defer rel.deinit(testing.allocator);
+
+    var raster = try render(testing.allocator, testing.io, &rel, .{
+        .view = .{ .width = 30, .height = 10, .x_min = -1, .x_max = 1, .y_min = -1, .y_max = 1 },
+    });
+    defer raster.deinit(testing.allocator);
+
+    var y: u32 = 0;
+    while (y < raster.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < raster.width) : (x += 1) {
+            if (x < 15) try testing.expect(raster.isSet(x, y));
+            if (x >= 15) try testing.expect(!raster.isSet(x, y));
+        }
+    }
+}
+
+test "a circle lands on the pixels the equation passes through" {
+    // x^2 + y^2 - 1 = 0 over [-1.5, 1.5]^2.
+    var rel = try testRelation(.eq, struct {
+        fn f(b: *expr.Builder) !expr.Index {
+            const s = try b.add(try b.powi(try b.x(), 2), try b.powi(try b.y(), 2));
+            return b.sub(s, try b.constant(1));
+        }
+    }.f);
+    defer rel.deinit(testing.allocator);
+
+    const n = 64;
+    var raster = try render(testing.allocator, testing.io, &rel, .{
+        .view = .{ .width = n, .height = n, .x_min = -1.5, .x_max = 1.5, .y_min = -1.5, .y_max = 1.5 },
+    });
+    defer raster.deinit(testing.allocator);
+
+    const view: View = .{ .width = n, .height = n, .x_min = -1.5, .x_max = 1.5, .y_min = -1.5, .y_max = 1.5 };
+
+    // Every point of the true circle must be covered.
+    for (0..360) |deg| {
+        const a = @as(f64, @floatFromInt(deg)) * std.math.pi / 180.0;
+        const px: u32 = @intFromFloat((@cos(a) - view.x_min) / (view.x_max - view.x_min) * n);
+        const py: u32 = @intFromFloat((view.y_max - @sin(a)) / (view.y_max - view.y_min) * n);
+        try testing.expect(raster.isSet(@min(px, n - 1), @min(py, n - 1)));
+    }
+
+    // And nothing far from it may be.
+    try testing.expect(!raster.isSet(n / 2, n / 2));
+    try testing.expect(!raster.isSet(0, 0));
+
+    // A curve, not a blob.
+    try testing.expect(raster.count() < n * n / 4);
+
+    // Soundness in the other direction: a pixel is only ever lit because a
+    // solution was *proved* to be inside it, so every lit pixel's box must
+    // actually meet the circle.
+    var py: u32 = 0;
+    while (py < n) : (py += 1) {
+        var px: u32 = 0;
+        while (px < n) : (px += 1) {
+            if (!raster.isSet(px, py)) continue;
+            const x0 = view.xAt(px);
+            const x1 = view.xAt(px + 1);
+            const y1 = view.yAt(py);
+            const y0 = view.yAt(py + 1);
+            const near_x = if (x0 <= 0 and 0 <= x1) 0 else @min(x0 * x0, x1 * x1);
+            const near_y = if (y0 <= 0 and 0 <= y1) 0 else @min(y0 * y0, y1 * y1);
+            const far = @max(x0 * x0, x1 * x1) + @max(y0 * y0, y1 * y1);
+            try testing.expect(near_x + near_y <= 1 + 1e-9);
+            try testing.expect(far >= 1 - 1e-9);
+        }
+    }
+}
+
+test "an everywhere-undefined relation renders nothing" {
+    // sqrt(-1 - x^2) = y  has no real solutions anywhere in view.
+    var rel = try testRelation(.eq, struct {
+        fn f(b: *expr.Builder) !expr.Index {
+            const inner = try b.sub(try b.constant(-1), try b.powi(try b.x(), 2));
+            return b.sub(try b.call(.sqrt, inner), try b.y());
+        }
+    }.f);
+    defer rel.deinit(testing.allocator);
+
+    var raster = try render(testing.allocator, testing.io, &rel, .{
+        .view = .{ .width = 32, .height = 32, .x_min = -2, .x_max = 2, .y_min = -2, .y_max = 2 },
+    });
+    defer raster.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), raster.count());
+}
+
+test "the number of strips does not change the image" {
+    var rel = try testRelation(.eq, struct {
+        fn f(b: *expr.Builder) !expr.Index {
+            const xi = try b.x();
+            const yi = try b.y();
+            return b.sub(
+                try b.call(.sin, try b.add(try b.powi(xi, 2), try b.powi(yi, 2))),
+                try b.call(.cos, try b.mul(xi, yi)),
+            );
+        }
+    }.f);
+    defer rel.deinit(testing.allocator);
+
+    const view: View = .{ .width = 48, .height = 48, .x_min = -3, .x_max = 3, .y_min = -3, .y_max = 3 };
+    var one = try render(testing.allocator, testing.io, &rel, .{ .view = view, .tasks = 1 });
+    defer one.deinit(testing.allocator);
+    var many = try render(testing.allocator, testing.io, &rel, .{ .view = view, .tasks = 17 });
+    defer many.deinit(testing.allocator);
+
+    try testing.expect(one.count() > 0);
+    try testing.expectEqualSlices(u8, one.bits, many.bits);
+}

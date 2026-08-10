@@ -1,0 +1,14 @@
+.{
+    .name = .implicit_plot,
+    .version = "0.1.0",
+    // Regenerated when the package was renamed from `zig_impl`; the low bits
+    // are derived from the name, so the old value no longer validates.
+    .fingerprint = 0x9393169570defa, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
