@@ -1,6 +1,6 @@
 // The manual's drawing helpers. Nothing here is part of the plugin's API -
 // a chain is points and a raster is bytes; this is one way to draw them.
-#import "plot.typ" as ip
+#import "lib.typ" as ip
 
 #let accent = rgb("#0078d4")
 // Opaque on purpose: fill rows overlap by a hair to defeat antialiasing seams,
@@ -11,9 +11,7 @@
 
 // A raster as ASCII art, for small demonstrations.
 #let art(pixels, width) = raw(
-  ip.rows(pixels, width)
-    .map(row => row.map(v => if v == 1 { "#" } else { "." }).join())
-    .join("\n"),
+  ip.rows(pixels, width).map(row => row.map(v => if v == 1 { "#" } else { "." }).join()).join("\n"),
 )
 
 // Stroke polylines from `contour` into a `size`-square box over `span`.

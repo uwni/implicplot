@@ -72,16 +72,17 @@ pub const Tag = enum(u8) {
     }
 
     /// Whether `name(...)` is how this operator is written. The ones that are
-    /// not are the leaves, the four with infix spellings, and `powi`, whose
-    /// second operand is an integer literal rather than an expression.
+    /// not are the leaves, the five with infix spellings - `mod` is written
+    /// `%`, floored like Python's - and `powi`, whose second operand is an
+    /// integer literal rather than an expression.
     ///
     /// An exhaustive switch rather than a list: adding a tag above stops the
     /// compiler here until someone says how it is spelled.
     pub fn isCallable(tag: Tag) bool {
         return switch (tag) {
-            .constant, .x, .y, .powi, .add, .sub, .mul, .div => false,
+            .constant, .x, .y, .powi, .add, .sub, .mul, .div, .mod => false,
             .neg, .abs, .sin, .cos, .tan, .exp, .sqrt, .log => true,
-            .asin, .acos, .atan, .floor, .ceil, .mod, .min, .max => true,
+            .asin, .acos, .atan, .floor, .ceil, .min, .max => true,
         };
     }
 };

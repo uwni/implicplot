@@ -148,7 +148,7 @@ pub const Prober = struct {
         // of the box where the relation holds, and reading that off involves no
         // intermediate value theorem and so needs no continuity. This is the
         // only thing that finds a solution of a step relation like
-        // `mod(x, 2) = 0`, whose zero set is a set of isolated lines that the
+        // `x % 2 = 0`, whose zero set is a set of isolated lines that the
         // sign-change argument below can never certify.
         if (@reduce(.Or, v == zero)) return true;
 

@@ -2,7 +2,7 @@
 //
 // A relation is one string, written the way it is written on paper:
 //
-//   #import "plot.typ" as ip
+//   #import "lib.typ" as ip
 //   #let pixels = ip.plot("sin(x^2 + y^2) = cos(x*y)",
 //     size: (64, 64), x: (-6, 6), y: (-6, 6))
 //   #let chains = ip.contour("sin(x^2 + y^2) = cos(x*y)", n: 60)
@@ -91,16 +91,17 @@
   /// The relation, written as text: `"sin(x^2 + y^2) = cos(x*y)"`.
   ///
   /// The language is $x$, $y$, the constants `pi`, `tau` and `e`, decimal
-  /// numbers (`1.5e3` included), `+ - * /`, parentheses, `^` with an integer
-  /// literal exponent, the functions `neg abs sin cos tan exp sqrt log asin
-  /// acos atan floor ceil` --- with `ln`, `arcsin`, `arccos` and `arctan` as
-  /// alternative spellings --- and `min(a, b)`, `max(a, b)` and `mod(a, b)`,
-  /// which is floored and takes the sign of its divisor. The comparison is one
-  /// of `= < <= > >=`, written between the two sides; `==` is accepted for
-  /// `=`. Whitespace is insignificant, but multiplication is never implicit:
-  /// `2x` is an error, and `x^y` is one too.
+  /// numbers (`1.5e3` included), `+ - * / %`, parentheses, `^` with an
+  /// integer literal exponent, the functions `neg abs sin cos tan exp sqrt
+  /// log asin acos atan floor ceil` --- with `ln`, `arcsin`, `arccos` and
+  /// `arctan` as alternative spellings --- and `min(a, b)` and `max(a, b)`.
+  /// `%` is floored modulo, taking the sign of its divisor as Python's does.
+  /// The comparison is one of `= < <= > >=`, written between the two sides;
+  /// `==` is accepted for `=`. Whitespace is insignificant, but
+  /// multiplication is never implicit: `2x` is an error, and `x^y` is one
+  /// too.
   ///
-  /// `floor`, `ceil` and `mod` are the only discontinuous operations. @contour
+  /// `floor`, `ceil` and `%` are the only discontinuous operations. @contour
   /// refuses to trace across a step and counts those cells in `uncertain`;
   /// `plot` needs no continuity and handles them exactly.
   ///

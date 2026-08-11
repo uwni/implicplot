@@ -149,6 +149,10 @@ const Parser = struct {
                     self.pos += 1;
                     lhs = try self.b.div(lhs, try self.unary());
                 },
+                '%' => {
+                    self.pos += 1;
+                    lhs = try self.b.binary(.mod, lhs, try self.unary());
+                },
                 else => break,
             }
         }
@@ -408,11 +412,18 @@ test "moving a term across the comparison changes nothing" {
 test "functions of two arguments" {
     try testing.expectApproxEqAbs(@as(f64, 3), (try evalAt("max(x, y) = 0", 3, 1)).v, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 1), (try evalAt("min(x, y) = 0", 3, 1)).v, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, 1), (try evalAt("mod(x, 3) = 0", 7, 0)).v, 1e-12);
-    try testing.expectApproxEqAbs(@as(f64, -2), (try evalAt("mod(x, -3) = 0", 7, 0)).v, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 1), (try evalAt("floor(x) = 0", 1.7, 0)).v, 1e-12);
     // Nesting and whitespace around the comma.
     try testing.expectApproxEqAbs(@as(f64, 2), (try evalAt("max(min(x,y) , 2) = 0", 1, 5)).v, 1e-12);
+}
+
+test "% is floored modulo, at the precedence of * and /" {
+    try testing.expectApproxEqAbs(@as(f64, 1), (try evalAt("x % 3 = 0", 7, 0)).v, 1e-12);
+    // Floored: the result takes the sign of the divisor, as in Python.
+    try testing.expectApproxEqAbs(@as(f64, -2), (try evalAt("x % -3 = 0", 7, 0)).v, 1e-12);
+    // Binds like * and /: tighter than +, left-associative among terms.
+    try testing.expectApproxEqAbs(@as(f64, 8), (try evalAt("7 + 3 % 2 = 0", 0, 0)).v, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 4), (try evalAt("8 % 3 * 2 = 0", 0, 0)).v, 1e-12);
 }
 
 test "the arity in the enum is the arity the parser enforces" {
@@ -425,8 +436,9 @@ test "the arity in the enum is the arity the parser enforces" {
     try testing.expect(std.mem.indexOf(u8, diag.message, "one argument") != null);
 
     // The operators that have an infix spelling do not also get a call
-    // spelling, so there is one way to write each of them.
-    for ([_][]const u8{ "add(x, y) = 0", "mul(x, y) = 0", "powi(x, 2) = 0", "constant(1) = 0" }) |source| {
+    // spelling, so there is one way to write each of them - `mod` included,
+    // which is written `%`.
+    for ([_][]const u8{ "add(x, y) = 0", "mul(x, y) = 0", "mod(x, 2) = 0", "powi(x, 2) = 0", "constant(1) = 0" }) |source| {
         diag = .{};
         try testing.expectError(error.ParseFailed, relationFrom(testing.allocator, source, &diag));
         try testing.expectEqualStrings("unknown name", diag.message);
@@ -443,7 +455,9 @@ test "the function list is generated from the enum and the aliases" {
         try testing.expect(std.mem.indexOf(u8, function_list, kv[0]) != null);
     }
     try testing.expect(std.mem.indexOf(u8, function_list, "log/ln") != null);
-    try testing.expect(std.mem.indexOf(u8, function_list, "mod(a,b)") != null);
+    try testing.expect(std.mem.indexOf(u8, function_list, "min(a,b)") != null);
+    // `mod` is spelled `%`, so it must NOT be offered as a function.
+    try testing.expect(std.mem.indexOf(u8, function_list, "mod") == null);
 }
 
 test "the message listing the comparisons is generated from the enum" {

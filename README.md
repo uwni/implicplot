@@ -4,6 +4,13 @@ Draw any implicit relation `f(x, y) op g(x, y)` using interval arithmetic.
 A Zig 0.16 rewrite of the JavaScript implementation in
 [uwni/implicit-relation-plot](https://github.com/uwni/implicit-relation-plot).
 
+![Five arms of a discrete logarithmic spiral, each one implicit relation](typst/thumbnail.png)
+
+The cover is `floor(15/(2pi) ln r) = floor(15/(2pi) theta) + k (mod 15)` for
+five residues `k`, drawn by this plotter (`typst/make-thumbnail.sh`) - a step
+relation whose solution set has area and no continuity, decided exactly by
+the corner-sampling proof rather than any sign-change argument.
+
 ```console
 $ zig build -Doptimize=ReleaseFast
 $ ./zig-out/bin/implicit-plot "sin(x^2 + y^2) = cos(x*y)"
@@ -20,7 +27,7 @@ sub-pixel refinement depth, worker count, and ASCII output.
 
 A box of the plane is either entirely in the solution set, entirely out of it,
 or undecided. Interval arithmetic answers that question soundly: evaluate the
-relation with intervals instead of numbers and the result *encloses* every value
+relation with intervals instead of numbers and the result _encloses_ every value
 `f` takes on the box. A quadtree subdivides the undecided boxes until they are
 one pixel, then a little further.
 
@@ -33,19 +40,19 @@ one pixel, then a little further.
                                 contour.trace  -->  Curves  -->  polylines
 ```
 
-| file | what it holds |
-| --- | --- |
+| file           | what it holds                                                             |
+| -------------- | ------------------------------------------------------------------------- |
 | `interval.zig` | interval arithmetic over `lanes` boxes at a time, plus three-valued logic |
-| `real.zig` | the same operations on plain floats, `lanes` points at a time |
-| `dual.zig` | forward-mode differentiation, as a third arithmetic domain |
-| `expr.zig` | the flat topologically-ordered node array, and the hash-consing builder |
-| `parse.zig` | `"sin(x^2+y^2) = cos(x*y)"` to a `Relation` |
-| `eval.zig` | one evaluator, generic over the arithmetic domain |
-| `relation.zig` | `f op 0`, and the two questions the plotter asks about a box |
-| `raster.zig` | 1 bit per pixel, byte-aligned rows |
-| `png.zig` | indexed 1-bit PNG encoder |
-| `plot.zig` | the quadtree, in pixel-index space, run in parallel |
-| `contour.zig` | the curve as polylines, by subdivision with a guaranteed topology |
+| `real.zig`     | the same operations on plain floats, `lanes` points at a time             |
+| `dual.zig`     | forward-mode differentiation, as a third arithmetic domain                |
+| `expr.zig`     | the flat topologically-ordered node array, and the hash-consing builder   |
+| `parse.zig`    | `"sin(x^2+y^2) = cos(x*y)"` to a `Relation`                               |
+| `eval.zig`     | one evaluator, generic over the arithmetic domain                         |
+| `relation.zig` | `f op 0`, and the two questions the plotter asks about a box              |
+| `raster.zig`   | 1 bit per pixel, byte-aligned rows                                        |
+| `png.zig`      | indexed 1-bit PNG encoder                                                 |
+| `plot.zig`     | the quadtree, in pixel-index space, run in parallel                       |
+| `contour.zig`  | the curve as polylines, by subdivision with a guaranteed topology         |
 
 Three decisions carry most of the design:
 
@@ -78,12 +85,18 @@ typst compile typst/manual.typ
 ```
 
 ```typst
-#import "plot.typ" as ip
+#import "lib.typ" as ip
 #let f = "sin(x^2 + y^2) = cos(x*y)"
 
 #let pixels = ip.plot(f, size: (8, 8), x: (-1, 1), y: (-1, 1))
 #let chains = ip.contour(f, n: 60, x: (-8, 8), y: (-8, 8))
 ```
+
+`typst/` is also a complete Typst _package_: `typst.toml` names `lib.typ` as
+the entrypoint, and `zig build wasm` puts the plugin next to it. Link that
+directory into your Typst data directory as `local/implicplot/0.1.0` and it
+imports as `@local/implicplot:0.1.0`; a Typst Universe submission is the same
+directory minus the files `typst.toml` excludes (the manual and its assets).
 
 The relation is one string with its comparison inside it, in the same language
 the command line takes, and `plot` and `contour` accept the same one. `contour`
@@ -92,18 +105,18 @@ traces the boundary `"f = 1"`.
 
 Two questions, two answers, and neither is an image:
 
-* **`plot`** asks which pixels the curve may touch and returns **one byte per
+- **`plot`** asks which pixels the curve may touch and returns **one byte per
   pixel**, row-major from the top - an 8 by 8 plot is a 64-byte array of 0 and
   1. It subdivides adaptively, it is rigorous, and it handles inequalities, so
-  it resolves a curve finer than its own pixels and fills regions.
-* **`contour`** asks where the curve is and returns **polylines**: arrays of
+     it resolves a curve finer than its own pixels and fills regions.
+- **`contour`** asks where the curve is and returns **polylines**: arrays of
   `(x, y)`, closed curves repeating their first point, plus a count of cells
   whose topology is not guaranteed. Use it when you need a stroke.
 
 `contour` is the algorithm of
-[Plantinga & Vegter, *Isotopic Approximation of Implicit Curves and Surfaces*, SGP 2004](https://pure.rug.nl/ws/files/2952308/2004ProcGeomProcPlantinga.pdf)
+[Plantinga & Vegter, _Isotopic Approximation of Implicit Curves and Surfaces_, SGP 2004](https://pure.rug.nl/ws/files/2952308/2004ProcGeomProcPlantinga.pdf)
 with the stopping rule of
-[Lin & Yap, *Adaptive Isotopic Approximation of Nonsingular Curves*, DCG 45, 2011](https://doi.org/10.1007/s00454-011-9345-9),
+[Lin & Yap, _Adaptive Isotopic Approximation of Nonsingular Curves_, DCG 45, 2011](https://doi.org/10.1007/s00454-011-9345-9),
 not marching squares on a grid. A grid has no way to know it is too coarse:
 where the curve turns faster than the spacing it connects samples that are not
 consecutive along the curve, and no post-processing detects it. The stopping
@@ -111,7 +124,7 @@ rule does know. A cell is finished when the interval enclosure of `F` over it
 excludes zero, or when `0 not in Fx(C)` or `0 not in Fy(C)` - Lin & Yap's "Cxy" -
 so `F` is strictly monotone in x or in y, so the curve is a single arc there
 with no loop and no second branch. Under that condition the output is proved
-*isotopic* to the true curve. (Plantinga & Vegter's own clause,
+_isotopic_ to the true curve. (Plantinga & Vegter's own clause,
 `<grad F, grad F> > 0`, implies Cxy and so splits cells Cxy would have
 accepted; measured here, the weaker rule is 1.67x faster for the same curve.)
 
@@ -127,7 +140,7 @@ refined.
 Where it stops short, it says so. `grad F` vanishes at a self-intersection, so
 neither clause can ever hold there - the paper assumes zero is a regular value.
 Those cells are counted in `uncertain` rather than passed off as correct.
-Tracing a *raster* instead would not help and is not a substitute: it follows
+Tracing a _raster_ instead would not help and is not a substitute: it follows
 the outline of the band of lit pixels, which on a 60 by 60 circle is twelve
 staircase fragments where tracing the field gives one loop.
 
@@ -150,7 +163,7 @@ the one the command line uses. Nothing then identifies an operator by number -
 `expr.Tag` and `interval.Op` have no numeric values, a function is spelled by
 its own tag name and a comparison by `Op.symbol`, and the parser builds both its
 tables and its error messages from those. So an operator is written down in
-exactly one place, `plot.typ` has no table to keep in step with the Zig enums,
+exactly one place, `lib.typ` has no table to keep in step with the Zig enums,
 and adding one makes it writable in a document at once.
 
 A relation that does not parse comes back as the protocol's failure message, as
@@ -167,19 +180,19 @@ error: plugin errored with: unknown name
 
 ## Differences from the JavaScript original
 
-* **Rigorous.** Every rounding operation inflates its result by an ulp, so the
+- **Rigorous.** Every rounding operation inflates its result by an ulp, so the
   computed interval really does contain the exact one. `cos` folds the error of
   its argument reduction into the interval instead of trusting a reduction that
   loses all precision for large arguments.
-* **`f < 0` is decided false as soon as `lo >= 0`**, not only when `lo > 0`. The
+- **`f < 0` is decided false as soon as `lo >= 0`**, not only when `lo > 0`. The
   strict test left any box whose bound landed exactly on the boundary undecided
   forever; `x < 0` over `[-1, 1]` was pathological because of it.
-* **`x^2` is a power, not `x * x`.** `[-1,1] * [-1,1]` is `[-1,1]`, but
+- **`x^2` is a power, not `x * x`.** `[-1,1] * [-1,1]` is `[-1,1]`, but
   `[-1,1]^2` is `[0,1]`, so curves converge in fewer subdivisions.
-* **Interval *sets* are gone.** They existed to notice, via their cardinality,
+- **Interval _sets_ are gone.** They existed to notice, via their cardinality,
   that a division had crossed a pole. That fact is now a `Decoration` on the
   value - the lattice from IEEE 1788-2015, whose propagation rule is a single
   `min` - the hull is kept instead of the union, which is still a sound
   enclosure, and evaluation no longer allocates.
-* **Sub-pixel refinement is depth-limited** rather than cut off at an absolute
+- **Sub-pixel refinement is depth-limited** rather than cut off at an absolute
   width of `1e-5` that had nothing to do with the plot's scale.

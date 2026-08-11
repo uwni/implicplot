@@ -58,8 +58,8 @@ const preamble =
     \\usage: implicit-plot [options] ["<relation>"]
     \\
     \\Draws the set of points satisfying a relation, using interval arithmetic.
-    \\The relation may use x, y, + - * / ^, parentheses, the constants pi, tau
-    \\and e, and these functions:
+    \\The relation may use x, y, + - * / % ^, parentheses, the constants pi,
+    \\tau and e, and these functions:
     \\
 ++ "  " ++ irp.parse.function_list ++ "\n" ++
     \\

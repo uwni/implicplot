@@ -1,7 +1,7 @@
 //! The Typst plugin's wire format, as pure code the host test suite runs.
 //!
 //! Two layouts cross the wasm boundary: the 42-byte little-endian options
-//! header both exports take, and the contour response. `typst/plot.typ`
+//! header both exports take, and the contour response. `typst/lib.typ`
 //! mirrors both in Typst, and this file is the side it mirrors. The length
 //! check in `Options.parse` catches an added or removed field, but only the
 //! golden-byte tests below notice a reordering: two swapped f64 fields keep
@@ -16,7 +16,7 @@ const plot = @import("plot.zig");
 const contour = @import("contour.zig");
 
 /// The most `contour`'s refinement byte may ask for; deeper is clamped, and
-/// `plot.typ` asserts the same bound before sending. (`plot`'s depth byte
+/// `lib.typ` asserts the same bound before sending. (`plot`'s depth byte
 /// uses the full 0..255.)
 pub const max_contour_refine = 10;
 
@@ -110,7 +110,7 @@ const testing = std.testing;
 
 test "the options header decodes the pinned layout" {
     // Hand-written bytes, not round-tripped through the encoder: this is the
-    // one place field order and endianness are stated as data, so `plot.typ`
+    // one place field order and endianness are stated as data, so `lib.typ`
     // drifting from `Options.parse` fails here rather than mis-plotting.
     const bytes = [Options.size]u8{
         3, 0, 0, 0, // width

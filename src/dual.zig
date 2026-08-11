@@ -238,7 +238,7 @@ test "every operator's derivative matches a central difference" {
         // The four with kinks or steps, sampled away from them: `floor` is
         // locally constant, `mod` is `a - m k` with `k` frozen, and `min`/`max`
         // are whichever side is winning.
-        "floor(x) * y = 0", "ceil(x) * y = 0",   "mod(x, 3) * y = 0", "mod(x, y) = 0",
+        "floor(x) * y = 0", "ceil(x) * y = 0",   "x % 3 * y = 0", "x % y = 0",
         "min(x, y) = 0",    "max(x, y) = 0",     "max(x*y, x + y) = 1",
     };
 

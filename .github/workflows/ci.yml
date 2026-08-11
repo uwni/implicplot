@@ -1,0 +1,40 @@
+# Everything the repo can check without a human: the host test suite (which
+# covers the wire format's golden bytes), the wasm plugin build, a CLI smoke
+# run, and a full compile of the manual - whose snippets are evaluated with
+# asserts, so it is also the only executable check of lib.typ against the
+# plugin it mirrors.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Test
+        run: zig build test
+
+      - name: Build CLI
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Smoke-plot a circle
+        run: ./zig-out/bin/implicit-plot -o smoke.png -s 64x64 -x -1.5:1.5 -y -1.5:1.5 "x^2 + y^2 = 1"
+
+      - name: Build Typst plugin
+        run: zig build wasm
+
+      - uses: typst-community/setup-typst@v4
+        with:
+          typst-version: "0.15.1"
+
+      - name: Compile the manual against the fresh plugin
+        run: typst compile typst/manual.typ

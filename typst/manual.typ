@@ -6,7 +6,7 @@
 // Each figure is shown as source next to its rendered result, via tidy's
 // example machinery. The snippets are evaluated during the build, so a snippet
 // that stops working fails the build.
-#import "plot.typ" as ip
+#import "lib.typ" as ip
 #import "manual-helpers.typ": *
 #import "@preview/tidy:0.4.3"
 #import "@preview/cetz:0.5.2"
@@ -36,8 +36,19 @@
   preview-block: block.with(stroke: 0.5pt + luma(225), radius: 3pt, width: 100%),
 )
 
-= Implicplot
+#show title: set text(size: 17pt)
+#show title: set align(center)
 
+#title[
+  Implicplot
+]
+
+#align(center)[
+  `v0.1.0`
+  Uwni 煢鴉\
+]
+
+= Abstract
 The module provides two entry points, which answer different questions about a
 relation written as one string, comparison included:
 `sin(x^2 + y^2) = cos(x*y)`. `plot` determines *which pixels the relation may
@@ -49,21 +60,22 @@ approach of Plantinga & Vegter @plantinga-vegter2004 with the stopping rule of
 Lin & Yap @lin-yap2011. Neither returns an image: both return data, and the
 document decides how to render it.
 
-Each figure below is shown next to its source. The snippets assume
-`#import "plot.typ" as ip` and four drawing helpers from `manual-helpers.typ`,
-next to this file: `art` (renders a raster as ASCII), `stroke-chains` (draws
-polylines into a box), `fill-chains` (fills closed chains as one even-odd
-vector path), and `fill-runs` (draws a raster as run-length rects). Each is
-about fifteen lines of plain Typst. The core of `stroke-chains` is:
+Each figure below is shown next to its source.#footnote[ The snippets assume
+  `#import "lib.typ" as ip` and four drawing helpers from `manual-helpers.typ`,
+  next to this file: `art` (renders a raster as ASCII), `stroke-chains` (draws
+  polylines into a box), `fill-chains` (fills closed chains as one even-odd
+  vector path), and `fill-runs` (draws a raster as run-length rects). Each is
+  about fifteen lines of plain Typst. The core of `stroke-chains` is:
 
-```typ
-place(curve(
-  curve.move(points.first()),
-  ..points.slice(1).map(p => curve.line(p)),
-))
-```
+  ```typc
+  place(curve(
+    curve.move(points.first()),
+    ..points.slice(1).map(p => curve.line(p)),
+  ))
+  ```
+]
 
-== What a relation may say
+= What a relation may say
 
 A relation is two expressions with a comparison between them --- one of
 `=`, `<`, `<=`, `>`, `>=`, where `==` is also accepted for `=`. Which side is
@@ -73,12 +85,12 @@ before it is plotted, and the subtraction of a literal zero is dropped, so
 
 An expression is built from $x$ and $y$, the constants `pi`, `tau` and `e`,
 decimal literals (`0.5`, `.5` and `1.5e3` all read), the operators
-`+ - * /` with a leading `-` for negation, parentheses, and `^`. Whitespace is
-insignificant. The functions are
+`+ - * / %` with a leading `-` for negation, parentheses, and `^`. Whitespace
+is insignificant. The functions are
 
 ```text
 abs  neg  sin  cos  tan  exp  sqrt  log  asin  acos  atan  floor  ceil
-min(a, b)   max(a, b)   mod(a, b)
+min(a, b)   max(a, b)
 ```
 
 with `ln`, `arcsin`, `arccos` and `arctan` as alternative spellings of four of
@@ -87,14 +99,14 @@ directly in the evaluator's operator enum, so the language has exactly the
 operations the two arithmetic domains implement and cannot come to disagree
 with them.
 
-`mod` is floored, taking the sign of its divisor as Python's `%` does, so
-`mod(7, -3)` is $-2$. `floor`, `ceil` and `mod` are the only operations here
-that are not continuous, and the step is not swept under the carpet: a cell whose image
-crosses one is marked discontinuous in the arithmetic itself, `contour` refuses
-to trace through it and counts it in `uncertain`, and `plot` --- which needs
-only the enclosure, never continuity --- is unaffected. Expect
-`contour("mod(x, 3) = 1")` to report a positive `uncertain`; the vertical lines
-it does return are still correct.
+`%` is floored modulo at the precedence of `*` and `/`, taking the sign of its
+divisor as Python's `%` does, so `7 % -3` is $-2$. `floor`, `ceil` and `%` are
+the only operations here that are not continuous, and the step is not swept
+under the carpet: a cell whose image crosses one is marked discontinuous in
+the arithmetic itself, `contour` refuses to trace through it and counts it in
+`uncertain`, and `plot` --- which needs only the enclosure, never continuity
+--- is unaffected. Expect `contour("x % 3 = 1")` to report a positive
+`uncertain`; the vertical lines it does return are still correct.
 
 Two restrictions are worth knowing before they surprise you. There is *no
 implicit multiplication* --- `2x` and `x y` are errors, and mean `2*x` and
@@ -114,7 +126,7 @@ error: plugin errored with: unknown name
                          ^
 ```
 
-== `plot`: one byte per pixel
+= `plot`: one byte per pixel
 
 #let half = ip.plot("x < 0", size: (8, 8), x: (-1, 1), y: (-1, 1))
 #assert.eq(half.len(), 64)
@@ -137,11 +149,13 @@ An inequality yields a filled region, which is what the raster represents:
   size: (76, 30), x: (-4, 4), y: (-2, 2)), 76)
 ```)
 
-== `contour`: the curve as polylines
+= `contour`: the curve as polylines
 
 #let circles = ip.contour(
   "(x^2 + y^2 - 4) * (x^2 + y^2 - 1) = 0",
-  n: 80, x: (-3, 3), y: (-3, 3),
+  n: 80,
+  x: (-3, 3),
+  y: (-3, 3),
 )
 #assert.eq(circles.chains.len(), 2)
 
@@ -162,7 +176,7 @@ including the hole. The output is vector; no raster is involved:
 )
 ```)
 
-== Poles and discontinuities
+= Poles and discontinuities
 
 A sampling tracer reads a sign change between two samples as a crossing. At an
 asymptote that sign change is a discontinuity rather than a root, and
@@ -180,8 +194,7 @@ $y = tan(x)$ produces no segment at its asymptotes:
   for chain in tangent.chains {
     for p in chain {
       let gradient = calc.sqrt(1 + calc.pow(1 / calc.pow(calc.cos(p.at(0)), 2), 2))
-      assert(calc.abs(p.at(1) - calc.tan(p.at(0))) / gradient < cell-width,
-        message: "point off the curve")
+      assert(calc.abs(p.at(1) - calc.tan(p.at(0))) / gradient < cell-width, message: "point off the curve")
     }
   }
 }
@@ -197,7 +210,7 @@ one cell of the true curve; the build asserts this. The pole columns are still
 counted: `uncertain` is #tangent.uncertain, because nothing about those cells
 was certified. They contribute no geometry.
 
-== Combining fill and stroke
+= Combining fill and stroke
 
 The two entry points answer different questions about the same relation and can
 be combined in one figure: `plot` fills the inequality --- its covering
@@ -230,7 +243,7 @@ straight chord and paints the wrong region; closing chains correctly along the
 window border is geometry the document would have to implement itself. The
 raster answers the region query directly and errs outward, never inward.
 
-== Gallery
+= Gallery
 
 #demo(```typ
 #let heart-edge = ip.contour("(x^2 + y^2 - 1)^3 <= x^2*y^3",
@@ -272,7 +285,7 @@ still drawn; the count marks where the topology is not certified. The heart
 uses the vector fill, which is exact to its polyline, so the fill is only as
 reliable as the boundary's topology.
 
-== Guarantees and their limits
+= Guarantees and their limits
 
 #let f = "sin(x^2 + y^2) = cos(x*y)"
 #let traced = ip.contour(f, n: 120, x: (-8, 8), y: (-8, 8), refine: 2)
@@ -347,14 +360,11 @@ reports. It can, however, be made on the basis of the relation: use `"join"`
 when the relation factors, as it does here, and `"avoid"` when the branches
 merely approach each other.
 
-== Writing relations efficiently
+= Writing relations efficiently
 
-#let tan-cleared = ip.contour("sin(x) = y*cos(x)",
-  n: 90, x: (-5, 5), y: (-4, 4))
-#let hyper-factored = ip.contour("(20*y + x) * (20*y - x) = 1",
-  n: 64, x: (-5, 11), y: (-1, 15))
-#let hyper-expanded = ip.contour("400*y^2 - x^2 = 1",
-  n: 64, x: (-5, 11), y: (-1, 15))
+#let tan-cleared = ip.contour("sin(x) = y*cos(x)", n: 90, x: (-5, 5), y: (-4, 4))
+#let hyper-factored = ip.contour("(20*y + x) * (20*y - x) = 1", n: 64, x: (-5, 11), y: (-1, 15))
+#let hyper-expanded = ip.contour("400*y^2 - x^2 = 1", n: 64, x: (-5, 11), y: (-1, 15))
 
 The numbers quoted below are computed during this build, so they describe the
 document you are reading.
@@ -400,7 +410,7 @@ hand, states the union structure explicitly, which is what makes
 two objectives conflict; each form costs one call to evaluate, and the
 `uncertain` count is the criterion.
 
-== Use with plotting packages
+= Use with plotting packages
 
 Chains and rasters are plain Typst data, so no adapters are required. Either
 package below can draw either figure; the two examples differ only in what they
@@ -450,15 +460,15 @@ self-intersection --- with the `uncertain` count in the title:
 )
 ```)
 
-== API reference
+= API reference
 
 The reference below is generated by the `tidy` package from the doc comments in
-`plot.typ`, so it cannot drift from the module. Its examples are evaluated
+`lib.typ`, so it cannot drift from the module. Its examples are evaluated
 during the build.
 
 #{
   let docs = tidy.parse-module(
-    read("plot.typ"),
+    read("lib.typ"),
     name: "plot",
     label-prefix: "ip-",
     scope: dictionary(ip),
