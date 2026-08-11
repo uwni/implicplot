@@ -41,10 +41,10 @@
 
 #title[
   Implicplot
+  #raw("v" + toml("typst.toml").package.version)
 ]
 
 #align(center)[
-  `v0.1.0`
   Uwni 煢鴉\
 ]
 
