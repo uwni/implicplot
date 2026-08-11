@@ -32,6 +32,7 @@ const Tri = interval.Tri;
 const Relation = relation.Relation;
 const Reading = relation.Reading;
 const Rect = relation.Rect;
+const Corners = relation.Corners;
 
 /// The mapping between pixel indices and the plane.
 pub const View = struct {
@@ -108,6 +109,28 @@ pub const Box = struct {
     }
 };
 
+/// The five points a quartering adds to a rect's four corners, forming a 3x3
+/// grid: the edge midpoints - bottom, left, right, top - then the centre.
+const grid_points = 5;
+const all_grid_points: u5 = 0b11111;
+
+/// Which grid points each quarter of `Rect.quarters` has as corners, as a bit
+/// set: every quarter touches the centre and its two adjacent edge midpoints.
+const quarter_points = [4]u5{ 0b10011, 0b10101, 0b11010, 0b11100 };
+
+/// A quarter's corner values, assembled from its parent's corners and the grid
+/// samples - in the lane order `relation.Corners` documents, which is how they
+/// are handed down to the next level of `refine`.
+fn quarterCorners(corners: Corners, vals: [grid_points]f64, quarter: usize) Corners {
+    return switch (quarter) {
+        0 => .{ corners[0], vals[1], vals[0], vals[4] },
+        1 => .{ vals[0], vals[4], corners[2], vals[2] },
+        2 => .{ vals[1], corners[1], vals[4], vals[3] },
+        3 => .{ vals[4], vals[3], vals[2], corners[3] },
+        else => unreachable,
+    };
+}
+
 /// One strip of rows, plus the scratch needed to work on it. Everything a task
 /// allocates is allocated here, before the group starts.
 const Worker = struct {
@@ -139,7 +162,8 @@ const Worker = struct {
         if (r.tri == .false) return;
 
         if (box.isPixel()) {
-            if (r.tri == .true or self.refine(self.rectOf(box), r, self.depth)) {
+            const rect = self.rectOf(box);
+            if (r.tri == .true or self.refine(rect, r, self.prober.cornerValues(rect), self.depth)) {
                 self.raster.set(box.x0, box.y0);
             }
             return;
@@ -164,20 +188,80 @@ const Worker = struct {
 
     /// Below one pixel there is no grid left to index, so refinement falls back
     /// to bisecting the rectangle - but with a bounded depth.
-    fn refine(self: *Worker, rect: Rect, r: Reading, depth: u8) bool {
-        if (self.prober.hasSolution(rect, r)) return true;
+    ///
+    /// `corners` holds the values of `f` at the rect's own corners; the caller
+    /// always has them. The sixteen corners of the four quarters are the nine
+    /// points of a 3x3 grid, of which four are `corners`, so a level samples at
+    /// most the five points it lacks - and only those its unknown quarters
+    /// will actually look at - instead of sixteen.
+    fn refine(self: *Worker, rect: Rect, r: Reading, corners: Corners, depth: u8) bool {
+        if (self.prober.provenBy(r, corners)) return true;
         if (depth == 0) return false;
 
         const quarters = rect.quarters();
         const readings = self.prober.probe(quarters);
-        for (quarters, readings) |quarter, reading| {
-            switch (reading.tri) {
-                .true => return true,
-                .false => {},
-                .unknown => if (self.refine(quarter, reading, depth - 1)) return true,
-            }
+
+        // A wholly-true quarter settles the rect by itself. Taking it before
+        // any recursion changes no verdict - every path out of the original
+        // interleaved loop returned true - it only skips needless sampling.
+        var needed: u5 = 0;
+        for (readings, quarter_points) |reading, points| switch (reading.tri) {
+            .true => return true,
+            .false => {},
+            .unknown => needed |= points,
+        };
+        if (needed == 0) return false;
+
+        const vals = self.sampleGrid(rect, needed);
+        for (quarters, readings, 0..) |quarter, reading, i| {
+            if (reading.tri != .unknown) continue;
+            if (self.refine(quarter, reading, quarterCorners(corners, vals, i), depth - 1)) return true;
         }
         return false;
+    }
+
+    /// Evaluate the grid points listed in `needed`, into their slots of the
+    /// point table. At most four points fit one vector pass, and `needed`
+    /// rarely wants all five, so the common case is a single pass with the
+    /// unused lanes repeating a point.
+    fn sampleGrid(self: *Worker, rect: Rect, needed: u5) [grid_points]f64 {
+        // The same midpoint expressions as `Rect.quarters`, so a sample lands
+        // exactly on the corner of the quarter it stands for.
+        const xm = 0.5 * (rect.x0 + rect.x1);
+        const ym = 0.5 * (rect.y0 + rect.y1);
+        const grid_x = [grid_points]f64{ xm, rect.x0, rect.x1, xm, xm };
+        const grid_y = [grid_points]f64{ rect.y0, ym, ym, rect.y1, ym };
+
+        var vals: [grid_points]f64 = undefined;
+        if (needed == all_grid_points) {
+            const four = self.prober.evalPoints(
+                .{ grid_x[0], grid_x[1], grid_x[2], grid_x[3] },
+                .{ grid_y[0], grid_y[1], grid_y[2], grid_y[3] },
+            );
+            inline for (0..4) |p| vals[p] = four[p];
+            vals[4] = self.prober.evalPoints(@splat(grid_x[4]), @splat(grid_y[4]))[0];
+            return vals;
+        }
+
+        var lanes: [4]u3 = undefined;
+        var count: usize = 0;
+        for (0..grid_points) |p| {
+            if ((needed >> @intCast(p)) & 1 != 0) {
+                lanes[count] = @intCast(p);
+                count += 1;
+            }
+        }
+        for (lanes[count..]) |*slot| slot.* = lanes[0];
+
+        var xs: [4]f64 = undefined;
+        var ys: [4]f64 = undefined;
+        for (lanes, &xs, &ys) |p, *x, *y| {
+            x.* = grid_x[p];
+            y.* = grid_y[p];
+        }
+        const got: [4]f64 = self.prober.evalPoints(xs, ys);
+        for (lanes[0..count], got[0..count]) |p, value| vals[p] = value;
+        return vals;
     }
 };
 

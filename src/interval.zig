@@ -42,13 +42,12 @@ pub const Tri = enum {
 
 /// Comparison against zero. Every relation `lhs op rhs` is normalised to
 /// `lhs - rhs op 0`, so this is the only comparison the plotter needs.
-/// Numbered for the same reason as `expr.Tag`: these values are wire format.
-pub const Op = enum(u8) {
-    eq = 0,
-    lt = 1,
-    le = 2,
-    gt = 3,
-    ge = 4,
+pub const Op = enum {
+    eq,
+    lt,
+    le,
+    gt,
+    ge,
 
     pub fn holds(op: Op, v: f64) bool {
         return switch (op) {
@@ -57,6 +56,35 @@ pub const Op = enum(u8) {
             .le => v <= 0,
             .gt => v > 0,
             .ge => v >= 0,
+        };
+    }
+
+    /// `holds` for a whole batch of samples: true if any lane satisfies it.
+    ///
+    /// A NaN needs no guard of its own. Every IEEE comparison against NaN is
+    /// false, so a lane whose sample was lost simply fails to satisfy the
+    /// relation, which is the answer a separate test would have produced.
+    pub fn holdsAny(op: Op, v: anytype) bool {
+        const zero: @TypeOf(v) = @splat(0);
+        return @reduce(.Or, switch (op) {
+            .eq => v == zero,
+            .lt => v < zero,
+            .le => v <= zero,
+            .gt => v > zero,
+            .ge => v >= zero,
+        });
+    }
+
+    /// How the comparison is written. `parse.zig` matches against this rather
+    /// than against spellings of its own, so each operator is spelled in
+    /// exactly one place and callers never learn a second name for it.
+    pub fn symbol(op: Op) []const u8 {
+        return switch (op) {
+            .eq => "=",
+            .lt => "<",
+            .le => "<=",
+            .gt => ">",
+            .ge => ">=",
         };
     }
 };
@@ -286,6 +314,83 @@ pub fn Interval(comptime lanes: comptime_int) type {
             return out;
         }
 
+        /// `min` and `max` are exact on endpoints - the smaller of two
+        /// representable numbers is representable - so neither widens, and
+        /// both are continuous, so neither demotes. They have a kink on
+        /// `{a = b}`, which is `abs`'s kink at zero and is handled the same
+        /// way, in `dual.zig`, by letting `sign` widen there.
+        pub fn min(a: Self, b: Self) Self {
+            return join(a, b, @min(a.lo, b.lo), @min(a.hi, b.hi));
+        }
+
+        pub fn max(a: Self, b: Self) Self {
+            return join(a, b, @max(a.lo, b.lo), @max(a.hi, b.hi));
+        }
+
+        /// Exact as well: the floor of an interval is the interval of the
+        /// floors, with no rounding to absorb.
+        ///
+        /// These are the only operators here that are defined everywhere and
+        /// continuous only sometimes. A box whose image crosses an integer
+        /// contains a jump, which is `def`; `contour` reads that and refuses
+        /// the cell rather than tracing across the step.
+        ///
+        /// `ceil` is `-floor(-x)` and `neg` costs nothing here, so having it as
+        /// an operator of its own buys no tightness - only one node in the
+        /// evaluation loop instead of three, and a name people expect to find.
+        pub fn floor(self: Self) Self {
+            var out = self;
+            out.lo = @floor(self.lo);
+            out.hi = @floor(self.hi);
+            return out.demote(out.lo != out.hi, .def);
+        }
+
+        pub fn ceil(self: Self) Self {
+            var out = self;
+            out.lo = @ceil(self.lo);
+            out.hi = @ceil(self.hi);
+            return out.demote(out.lo != out.hi, .def);
+        }
+
+        /// `a - m floor(a/m)`: the modulo that takes the sign of its divisor,
+        /// as Python and every graphing calculator spell it.
+        ///
+        /// Not `@mod`, which disagrees for a negative divisor - `@mod(7, -3)`
+        /// is 1 where this is -2. Either convention would do, but the three
+        /// domains have to pick the same one, and the range bound below is
+        /// only sound for this one.
+        ///
+        /// Two enclosures are computed and intersected, because each is
+        /// hopeless exactly where the other is tight. The composition is exact
+        /// while the box stays inside one period and useless once it does not:
+        /// `[0,10] mod 3` comes out as `[-9, 10]`. The range bound - a modulo
+        /// lies between zero and its divisor - knows nothing about which
+        /// period but pins that case to `[0, 3]`.
+        pub fn mod(a: Self, m: Self) Self {
+            const zero = vec(0);
+            const composed = a.sub(m.mul(a.div(m).floor()));
+
+            // `0` and `m` bound the *exact* modulo, and clipping to them would
+            // cut off the sampler, which computes the same subtraction in
+            // floating point and loses `ulp(a)` to cancellation - an absolute
+            // error, at the scale of `a` rather than of the small result. The
+            // range bound is given that much room before it is allowed to
+            // tighten anything.
+            const slack = @max(@abs(a.lo), @abs(a.hi)) * vec(2 * eps) + vec(tiny);
+
+            var out = composed;
+            out.lo = @max(composed.lo, @min(zero, m.lo) - slack);
+            out.hi = @min(composed.hi, @max(zero, m.hi) + slack);
+
+            // Two sound enclosures of the same set cannot fail to meet, so an
+            // empty intersection would mean one of them is wrong. Keeping the
+            // composition is the conservative reading of that.
+            const empty = out.lo > out.hi;
+            out.lo = @select(f64, empty, composed.lo, out.lo);
+            out.hi = @select(f64, empty, composed.hi, out.hi);
+            return out;
+        }
+
         inline fn powVec(v: F, n: u32) F {
             var acc: F = vec(1);
             var base = v;
@@ -306,9 +411,11 @@ pub fn Interval(comptime lanes: comptime_int) type {
                 out.hi = vec(1);
                 return out;
             }
-            if (n < 0) return splat(1).div(self.powi(-n));
-
-            const k: u32 = @intCast(n);
+            // The exponent is only ever needed as a magnitude, and `@abs` of a
+            // signed integer is unsigned - so the most negative i32 is
+            // representable here, where recursing on `-n` for a negative
+            // exponent would overflow on it. See `real.powi`.
+            const k: u32 = @abs(n);
             const a = powVec(self.lo, k);
             const b = powVec(self.hi, k);
             var out = self;
@@ -325,7 +432,8 @@ pub fn Interval(comptime lanes: comptime_int) type {
             // One ulp - enough for the single multiply of `x^2` - is not enough
             // for anything beyond it.
             const roundings: f64 = @floatFromInt(2 * (32 - @clz(k)));
-            return out.inflate(vec(roundings));
+            out = out.inflate(vec(roundings));
+            return if (n < 0) splat(1).div(out) else out;
         }
 
         // -- transcendental ----------------------------------------------
@@ -717,7 +825,7 @@ test "every binary operation encloses the values it takes" {
         const a = Iv.repeat(alo, ahi);
         const b = Iv.repeat(blo, bhi);
 
-        inline for (.{ "add", "sub", "mul", "div" }) |name| {
+        inline for (.{ "add", "sub", "mul", "div", "mod", "min", "max" }) |name| {
             const enclosure = @field(Iv, name)(a, b);
             for (0..9) |i| {
                 for (0..9) |j| {
@@ -733,6 +841,77 @@ test "every binary operation encloses the values it takes" {
                     }
                 }
             }
+        }
+    }
+}
+
+test "floor and mod are exact where they can be and honest where they cannot" {
+    // `floor` costs nothing in width, and says `dac` only while the box stays
+    // between two integers - the jump is what `contour` reads to refuse a cell.
+    const inside = Iv.repeat(1.2, 1.8).floor();
+    try testing.expectEqual(@as(f64, 1), inside.lo[0]);
+    try testing.expectEqual(@as(f64, 1), inside.hi[0]);
+    try testing.expectEqual(Decoration.dac, inside.decoration(0));
+
+    const crossing = Iv.repeat(0.5, 1.5).floor();
+    try testing.expectEqual(@as(f64, 0), crossing.lo[0]);
+    try testing.expectEqual(@as(f64, 1), crossing.hi[0]);
+    try testing.expectEqual(Decoration.def, crossing.decoration(0));
+
+    // `ceil` is `-floor(-x)` exactly, decoration included, since `neg` neither
+    // rounds nor demotes - so the operator has to agree with the composition.
+    for ([_][2]f64{ .{ 1.2, 1.8 }, .{ 0.5, 1.5 }, .{ -2.5, -1.5 }, .{ 2, 3 } }) |b| {
+        const direct = Iv.repeat(b[0], b[1]).ceil();
+        const composed = Iv.repeat(b[0], b[1]).neg().floor().neg();
+        try testing.expectEqual(composed.lo[0], direct.lo[0]);
+        try testing.expectEqual(composed.hi[0], direct.hi[0]);
+        try testing.expectEqual(composed.decoration(0), direct.decoration(0));
+    }
+
+    // The composition alone gives `[-9, 10]` here; the range bound is what
+    // makes the answer usable.
+    const spanning = Iv.repeat(0, 10).mod(Iv.repeat(3, 3));
+    try testing.expect(spanning.lo[0] >= -1e-14 and spanning.hi[0] <= 3 + 1e-14);
+    try testing.expectEqual(Decoration.def, spanning.decoration(0));
+
+    // Inside one period the composition is exact and the range bound, which
+    // knows nothing about which period, must not spoil it.
+    const single = Iv.repeat(4, 5).mod(Iv.repeat(3, 3));
+    try testing.expect(single.lo[0] <= 1 and single.hi[0] >= 2 and single.hi[0] < 2.5);
+    try testing.expectEqual(Decoration.dac, single.decoration(0));
+
+    // Floored, so the result takes the sign of the divisor: 7 mod -3 is -2.
+    const negative = Iv.repeat(7, 7).mod(Iv.repeat(-3, -3));
+    try testing.expect(negative.lo[0] <= -2 and negative.hi[0] >= -2 and negative.lo[0] > -3.1);
+
+    // `min` and `max` round nothing away and stay continuous.
+    const smaller = Iv.repeat(-1, 2).min(Iv.repeat(0, 3));
+    try testing.expectEqual(@as(f64, -1), smaller.lo[0]);
+    try testing.expectEqual(@as(f64, 2), smaller.hi[0]);
+    try testing.expectEqual(Decoration.dac, smaller.decoration(0));
+
+    const larger = Iv.repeat(-1, 2).max(Iv.repeat(0, 3));
+    try testing.expectEqual(@as(f64, 0), larger.lo[0]);
+    try testing.expectEqual(@as(f64, 3), larger.hi[0]);
+}
+
+test "a modulo whose subtraction cancels still encloses what the sampler computes" {
+    // `a - m floor(a/m)` loses `ulp(a)` to cancellation, which is enormous
+    // next to the result when the divisor is tiny. Clipping to the exact
+    // `[0, m]` would put the sampled value outside the enclosure, and the
+    // plotter reads both.
+    const Real = @import("real.zig").Real(1);
+    for ([_][2]f64{ .{ 5, 1e-15 }, .{ 5, 1e-12 }, .{ -7.5, 1e-14 }, .{ 1e6, 1e-9 } }) |case| {
+        const a = case[0];
+        const m = case[1];
+        const enclosure = Iv.repeat(a, a).mod(Iv.repeat(m, m));
+        const sampled = Real.splat(a).mod(Real.splat(m)).v[0];
+        if (std.math.isNan(sampled)) continue;
+        if (!(enclosure.lo[0] <= sampled and sampled <= enclosure.hi[0])) {
+            std.debug.print("mod({d}, {d}) = [{d}, {d}] misses the sampled {d}\n", .{
+                a, m, enclosure.lo[0], enclosure.hi[0], sampled,
+            });
+            return error.NotAnEnclosure;
         }
     }
 }

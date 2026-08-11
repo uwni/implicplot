@@ -1,19 +1,19 @@
 //! Typst plugin front end, speaking the
 //! [wasm minimal protocol](https://github.com/typst-community/wasm-minimal-protocol).
 //!
-//! Three exports, all taking a relation as a postfix opcode stream plus a fixed
-//! options header:
+//! Two exports, both taking the relation as *source text* and parsing it here:
 //!
-//!   * `opcodes()` returns the operator table as text, generated from the enums
-//!     in `bytecode.zig`, so the document side never hard-codes these numbers.
-//!   * `plot(program, options)` returns **one byte per pixel**, row-major from
+//!   * `plot(relation, options)` returns **one byte per pixel**, row-major from
 //!     the top: an 8 by 8 plot comes back as 64 bytes of 0 or 1. Not an image -
 //!     the document decides what to draw with it.
-//!   * `contour(program, options)` returns the curve as polylines, for stroking
-//!     rather than filling.
+//!   * `contour(relation, options)` returns the curve as polylines, for
+//!     stroking rather than filling. It reads only `lhs - rhs`, since tracing
+//!     asks where that vanishes.
 //!
-//! This file is only protocol plumbing. The wire format lives in
-//! `bytecode.zig`, where it is tested on the host rather than through wasm.
+//! The relation is one string, `"sin(x^2 + y^2) = cos(x*y)"`, parsed by the
+//! same `parse.zig` the command line uses. Nothing numeric crosses this
+//! boundary but the view: no operator has a number the two sides must agree
+//! on, and there is no encoder in the document to keep in step.
 
 const std = @import("std");
 const irp = @import("implicit_plot");
@@ -38,14 +38,33 @@ fn fail(message: []const u8) Retval {
     return .failure;
 }
 
-/// The `options` argument: little-endian, 43 bytes.
+/// Where a `ParseFailed` happened, so that the failure message can be the same
+/// caret report the command line prints instead of an error name.
+///
+/// `source` points into the argument buffer, so that buffer has to outlive the
+/// call that failed: it is allocated in the export, not in the `Impl` below.
+const Failure = struct {
+    diagnostic: irp.parse.Diagnostic = .{},
+    /// The text `diagnostic.offset` indexes into.
+    source: []const u8 = "",
+
+    fn report(self: Failure, err: anyerror) Retval {
+        if (err != error.ParseFailed) return fail(@errorName(err));
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        self.diagnostic.report(&out.writer, self.source) catch return fail("out of memory");
+        sendResultToHost(out.writer.buffered());
+        return .failure;
+    }
+};
+
+/// The `options` argument: little-endian, 42 bytes.
 ///
 /// A packed struct would describe this more directly, but its in-memory layout
 /// is not the wire layout on every target, and getting that wrong is silent.
 const Options = struct {
-    const size = 1 + 4 + 4 + 8 * 4 + 1 + 1;
+    const size = 4 + 4 + 8 * 4 + 1 + 1;
 
-    op: irp.Op,
     view: irp.View,
     /// `plot`: how far a single undecided pixel may be subdivided. `contour`:
     /// how far below `n`'s resolution an unresolved cell may be split.
@@ -59,17 +78,16 @@ const Options = struct {
     fn parse(bytes: []const u8) !Options {
         if (bytes.len != size) return error.BadOptionsLength;
         return .{
-            .op = std.enums.fromInt(irp.Op, bytes[0]) orelse return error.UnknownRelation,
             .view = .{
-                .width = std.mem.readInt(u32, bytes[1..5], .little),
-                .height = std.mem.readInt(u32, bytes[5..9], .little),
-                .x_min = readFloat(bytes[9..17]),
-                .x_max = readFloat(bytes[17..25]),
-                .y_min = readFloat(bytes[25..33]),
-                .y_max = readFloat(bytes[33..41]),
+                .width = std.mem.readInt(u32, bytes[0..4], .little),
+                .height = std.mem.readInt(u32, bytes[4..8], .little),
+                .x_min = readFloat(bytes[8..16]),
+                .x_max = readFloat(bytes[16..24]),
+                .y_min = readFloat(bytes[24..32]),
+                .y_max = readFloat(bytes[32..40]),
             },
-            .depth = bytes[41],
-            .join_uncertain = switch (bytes[42]) {
+            .depth = bytes[40],
+            .join_uncertain = switch (bytes[41]) {
                 0 => false,
                 1 => true,
                 else => return error.UnknownUncertainPolicy,
@@ -104,16 +122,15 @@ const max_pixels = 1 << 22;
 /// `contour` samples a grid of f64, so it gets a tighter cap.
 const max_samples = 1 << 20;
 
-export fn opcodes() Retval {
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-    irp.bytecode.writeTable(&out.writer) catch return fail("out of memory");
-    sendResultToHost(out.writer.buffered());
-    return .success;
-}
+/// Which pixels the relation may touch, as one byte each.
+export fn plot(relation_len: usize, options_len: usize) Retval {
+    const args = gpa.alloc(u8, relation_len + options_len) catch return fail("out of memory");
+    defer gpa.free(args);
+    wasm_minimal_protocol_write_args_to_buffer(args.ptr);
 
-export fn plot(program_len: usize, options_len: usize) Retval {
-    plotImpl(program_len, options_len) catch |err| return fail(@errorName(err));
+    var failure: Failure = .{ .source = args[0..relation_len] };
+    plotImpl(args[0..relation_len], args[relation_len..], &failure) catch |err|
+        return failure.report(err);
     return .success;
 }
 
@@ -129,21 +146,23 @@ export fn plot(program_len: usize, options_len: usize) Retval {
 /// ```
 ///
 /// `width` and `height` are the tracing grid, not pixels.
-export fn contour(program_len: usize, options_len: usize) Retval {
-    contourImpl(program_len, options_len) catch |err| return fail(@errorName(err));
-    return .success;
-}
-
-fn plotImpl(program_len: usize, options_len: usize) !void {
-    const args = try gpa.alloc(u8, program_len + options_len);
+export fn contour(relation_len: usize, options_len: usize) Retval {
+    const args = gpa.alloc(u8, relation_len + options_len) catch return fail("out of memory");
     defer gpa.free(args);
     wasm_minimal_protocol_write_args_to_buffer(args.ptr);
 
-    const options = try Options.parse(args[program_len..]);
+    var failure: Failure = .{ .source = args[0..relation_len] };
+    contourImpl(args[0..relation_len], args[relation_len..], &failure) catch |err|
+        return failure.report(err);
+    return .success;
+}
+
+fn plotImpl(source: []const u8, options_bytes: []const u8, failure: *Failure) !void {
+    const options = try Options.parse(options_bytes);
     try options.validate();
     if (options.pixels() > max_pixels) return error.ImageTooLarge;
 
-    var relation = try irp.bytecode.decode(gpa, args[0..program_len], options.op);
+    var relation = try irp.parse.relationFrom(gpa, source, &failure.diagnostic);
     defer relation.deinit(gpa);
 
     // Freestanding wasm has no threads, so there is nowhere to run strips:
@@ -169,16 +188,14 @@ fn plotImpl(program_len: usize, options_len: usize) !void {
     sendResultToHost(pixels);
 }
 
-fn contourImpl(program_len: usize, options_len: usize) !void {
-    const args = try gpa.alloc(u8, program_len + options_len);
-    defer gpa.free(args);
-    wasm_minimal_protocol_write_args_to_buffer(args.ptr);
-
-    const options = try Options.parse(args[program_len..]);
+fn contourImpl(source: []const u8, options_bytes: []const u8, failure: *Failure) !void {
+    const options = try Options.parse(options_bytes);
     try options.validate();
     if (options.samples() > max_samples) return error.GridTooLarge;
 
-    var relation = try irp.bytecode.decode(gpa, args[0..program_len], options.op);
+    // Whatever comparison the relation was written with, tracing answers where
+    // `lhs - rhs` vanishes: `relation.op` is simply never read below.
+    var relation = try irp.parse.relationFrom(gpa, source, &failure.diagnostic);
     defer relation.deinit(gpa);
 
     // `width` is a resolution request, not a grid: the tree splits at least

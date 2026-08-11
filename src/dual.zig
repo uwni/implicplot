@@ -90,6 +90,56 @@ pub fn Dual(comptime Base: type) type {
             return chain(a, a.v.abs(), a.v.sign());
         }
 
+        /// `max(a, b)` is `(a + b + |a - b|)/2`, so its derivative is
+        /// `(a' + b' + sign(a-b)(a' - b'))/2`: the larger side's slope, and
+        /// where the box straddles `a = b` the same widening `abs` gets at its
+        /// own kink, which is the hull of the two. The *value* comes from the
+        /// domain's own `max` rather than from that formula, which over
+        /// intervals would be looser for nothing.
+        pub fn max(a: Self, b: Self) Self {
+            const s = a.v.sub(b.v).sign();
+            return .{
+                .v = a.v.max(b.v),
+                .dx = a.dx.add(b.dx).add(s.mul(a.dx.sub(b.dx))).div(two),
+                .dy = a.dy.add(b.dy).add(s.mul(a.dy.sub(b.dy))).div(two),
+            };
+        }
+
+        pub fn min(a: Self, b: Self) Self {
+            const s = a.v.sub(b.v).sign();
+            return .{
+                .v = a.v.min(b.v),
+                .dx = a.dx.add(b.dx).sub(s.mul(a.dx.sub(b.dx))).div(two),
+                .dy = a.dy.add(b.dy).sub(s.mul(a.dy.sub(b.dy))).div(two),
+            };
+        }
+
+        /// Zero, not `chain`: a step is constant between consecutive integers,
+        /// so wherever it has a derivative at all that derivative is exactly
+        /// zero, whatever the argument's is. Where it has none - a box whose
+        /// image crosses an integer - the value comes back `def` rather than
+        /// `dac`, and `contour` drops the cell on that alone, before anything
+        /// reads this.
+        pub fn floor(a: Self) Self {
+            return .{ .v = a.v.floor(), .dx = zero, .dy = zero };
+        }
+
+        pub fn ceil(a: Self) Self {
+            return .{ .v = a.v.ceil(), .dx = zero, .dy = zero };
+        }
+
+        /// `(a - m k)'` with `k = floor(a/m)` held constant, which it is
+        /// wherever `mod` is differentiable. Across a step it is not, and the
+        /// value's decoration says so; see `floor`.
+        pub fn mod(a: Self, m: Self) Self {
+            const k = a.v.div(m.v).floor();
+            return .{
+                .v = a.v.mod(m.v),
+                .dx = a.dx.sub(m.dx.mul(k)),
+                .dy = a.dy.sub(m.dy.mul(k)),
+            };
+        }
+
         pub fn sin(a: Self) Self {
             return chain(a, a.v.sin(), a.v.cos());
         }
@@ -185,6 +235,11 @@ test "every operator's derivative matches a central difference" {
         "tan(x) * y = 0",  "exp(x) * y = 0",   "sqrt(x) * y = 0", "log(x) * y = 0",
         "asin(x/4) = y",   "acos(x/4) = y",    "atan(x) * y = 0", "x^3 * y = 0",
         "x^-2 * y = 0",  "sqrt(x^2 + y^2) = 1",
+        // The four with kinks or steps, sampled away from them: `floor` is
+        // locally constant, `mod` is `a - m k` with `k` frozen, and `min`/`max`
+        // are whichever side is winning.
+        "floor(x) * y = 0", "ceil(x) * y = 0",   "mod(x, 3) * y = 0", "mod(x, y) = 0",
+        "min(x, y) = 0",    "max(x, y) = 0",     "max(x*y, x + y) = 1",
     };
 
     const h = 1e-6;
@@ -219,6 +274,10 @@ test "over intervals the derivative is an enclosure, not an estimate" {
         "x^3 - 3*x*y^2 = 1",
         "exp(x) * sin(y) = x",
         "sqrt(x^2 + y^2) = 2",
+        // Continuous but kinked: on a box straddling `a = b` the enclosure has
+        // to be the hull of both branches, not whichever one the midpoint is on.
+        "min(x, y) = 1",
+        "max(x*y, x + y) = 1",
     };
 
     inline for (sources) |source| {

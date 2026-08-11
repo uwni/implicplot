@@ -25,41 +25,63 @@
 
 const std = @import("std");
 
-/// The operator set.
+/// The operator set, and the whole of the language: every unary tag is
+/// callable in source under its own name, so `parse.zig` needs no table of
+/// its own and adding an operator here makes it writable at once.
 ///
-/// The numbers are part of the plugin wire format (see `bytecode.zig`), so they
-/// are written out rather than left implicit: a new operator is *appended*, and
-/// an existing one never moves.
+/// The tags are unnumbered because nothing outside this program identifies an
+/// operator by number - not even the Typst plugin, which is handed source text
+/// and parses it.
 pub const Tag = enum(u8) {
     // leaves
-    constant = 0,
-    x = 1,
-    y = 2,
+    constant,
+    x,
+    y,
     // unary
-    neg = 3,
-    abs = 4,
-    sin = 5,
-    cos = 6,
-    tan = 7,
-    exp = 8,
-    sqrt = 9,
-    log = 10,
-    asin = 11,
-    acos = 12,
-    atan = 13,
+    neg,
+    abs,
+    sin,
+    cos,
+    tan,
+    exp,
+    sqrt,
+    log,
+    asin,
+    acos,
+    atan,
+    floor,
+    ceil,
     /// unary, with the integer exponent stored in `Node.b`
-    powi = 14,
+    powi,
     // binary
-    add = 15,
-    sub = 16,
-    mul = 17,
-    div = 18,
+    add,
+    sub,
+    mul,
+    div,
+    mod,
+    min,
+    max,
 
     pub fn arity(tag: Tag) u2 {
         return switch (tag) {
             .constant, .x, .y => 0,
-            .neg, .abs, .sin, .cos, .tan, .exp, .sqrt, .log, .asin, .acos, .atan, .powi => 1,
-            .add, .sub, .mul, .div => 2,
+            .neg, .abs, .sin, .cos, .tan, .exp, .sqrt, .log => 1,
+            .asin, .acos, .atan, .floor, .ceil, .powi => 1,
+            .add, .sub, .mul, .div, .mod, .min, .max => 2,
+        };
+    }
+
+    /// Whether `name(...)` is how this operator is written. The ones that are
+    /// not are the leaves, the four with infix spellings, and `powi`, whose
+    /// second operand is an integer literal rather than an expression.
+    ///
+    /// An exhaustive switch rather than a list: adding a tag above stops the
+    /// compiler here until someone says how it is spelled.
+    pub fn isCallable(tag: Tag) bool {
+        return switch (tag) {
+            .constant, .x, .y, .powi, .add, .sub, .mul, .div => false,
+            .neg, .abs, .sin, .cos, .tan, .exp, .sqrt, .log => true,
+            .asin, .acos, .atan, .floor, .ceil, .mod, .min, .max => true,
         };
     }
 };
@@ -162,7 +184,21 @@ pub const Builder = struct {
     pub fn add(self: *Builder, a: Index, b: Index) !Index {
         return self.binary(.add, a, b);
     }
+    /// `a - 0` is `a` exactly, on every endpoint and in every domain, so
+    /// collapsing it is free in the same way `x^1` is. It is worth doing
+    /// because normalising `lhs op rhs` to `lhs - rhs op 0` means a relation
+    /// already written against zero - which is most of them - would otherwise
+    /// carry a subtraction that widens its enclosure by an ulp for nothing.
+    ///
+    /// Only `+0`. `a - (-0)` is `a + 0`, which is `+0` rather than `-0` when
+    /// `a` is `-0` - the one input where dropping the subtraction would change
+    /// the value. The parser cannot reach it, because a leading minus becomes
+    /// a `neg` node rather than a negative literal, but that is a fact about
+    /// `parse.zig`; an identity that holds unconditionally is one nobody has to
+    /// re-derive from another file.
     pub fn sub(self: *Builder, a: Index, b: Index) !Index {
+        const rhs = self.nodes.items[b];
+        if (rhs.tag == .constant and rhs.value == 0 and !std.math.signbit(rhs.value)) return a;
         return self.binary(.sub, a, b);
     }
     pub fn mul(self: *Builder, a: Index, b: Index) !Index {
@@ -241,4 +277,20 @@ test "x^1 collapses to x" {
     defer b.deinit();
     const xi = try b.x();
     try testing.expectEqual(xi, try b.powi(xi, 1));
+}
+
+test "subtracting zero collapses, subtracting minus zero does not" {
+    var b = Builder.init(testing.allocator);
+    defer b.deinit();
+    const xi = try b.x();
+
+    try testing.expectEqual(xi, try b.sub(xi, try b.constant(0)));
+
+    // -0 is a different constant, and `a - (-0)` is not `a` for a = -0.
+    const minus_zero = try b.sub(xi, try b.constant(-0.0));
+    try testing.expectEqual(Tag.sub, b.nodes.items[minus_zero].tag);
+
+    // Nothing else folds: `0 - x` is still a subtraction.
+    const flipped = try b.sub(try b.constant(0), xi);
+    try testing.expectEqual(Tag.sub, b.nodes.items[flipped].tag);
 }

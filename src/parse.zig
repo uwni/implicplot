@@ -1,6 +1,12 @@
 //! A parser for relations written the way people write them:
 //! `sin(x^2 + y^2) = cos(x*y)`.
 //!
+//! `relationFrom` is the only way in, and a relation is one string with its
+//! comparison inside it. Every caller - the command line, the Typst plugin -
+//! hands over the same text, so there is one grammar to learn and `f(x) > 1`
+//! and `f(x) - 1 > 0` are the same relation written two ways rather than two
+//! interfaces.
+//!
 //! The original could only be driven from Zig, by hand-assembling nodes in
 //! `main`, which is why its `main` had a hard-coded expression and its command
 //! line took no arguments at all.
@@ -24,14 +30,31 @@ pub const Diagnostic = struct {
 
 pub const Error = error{ParseFailed} || std.mem.Allocator.Error;
 
+/// Source longer than this is rejected unread. The plugin is fed by untrusted
+/// document input, and no relation anyone writes comes close.
+pub const max_source = 1 << 16;
+
+/// How deep the recursive descent may go. Every level of parentheses, function
+/// call or repeated sign is one level, and each costs a few stack frames -
+/// which on `wasm32-freestanding`, with panics compiled out, would otherwise
+/// end in a bare trap rather than a message.
+pub const max_depth = 256;
+
+fn failAt(diag: ?*Diagnostic, offset: usize, message: []const u8) Error {
+    if (diag) |d| d.* = .{ .offset = offset, .message = message };
+    return error.ParseFailed;
+}
+
 /// Parse `source` into a relation in the normal form `lhs - rhs op 0`.
 pub fn relationFrom(gpa: std.mem.Allocator, source: []const u8, diag: ?*Diagnostic) Error!relation.Relation {
+    if (source.len > max_source) return failAt(diag, 0, "relation too long");
+
     var builder = expr.Builder.init(gpa);
     defer builder.deinit();
 
     var p: Parser = .{ .src = source, .b = &builder, .diag = diag };
     const lhs = try p.expression();
-    const op = try p.relationOp();
+    const op = try p.comparison();
     const rhs = try p.expression();
     p.skipSpace();
     if (p.pos != source.len) return p.fail("unexpected trailing input");
@@ -40,15 +63,34 @@ pub fn relationFrom(gpa: std.mem.Allocator, source: []const u8, diag: ?*Diagnost
     return .{ .program = try builder.build(), .root = root, .op = op };
 }
 
+/// Every comparison the language has, generated from the enum so that this
+/// table and `Op.symbol` cannot come to disagree. `getLongestPrefix` matches
+/// the longest key first, so `<=` is never read as a `<` with junk after it.
+const comparisons = std.StaticStringMap(relation.Op).initComptime(kvs: {
+    const ops = std.enums.values(relation.Op);
+    var list: [ops.len]struct { []const u8, relation.Op } = undefined;
+    for (ops, &list) |op, *kv| kv.* = .{ op.symbol(), op };
+    break :kvs list;
+});
+
+/// Spelled out from the enum, so the message cannot list a set of operators
+/// the parser does not accept.
+const expected_comparison = blk: {
+    var message: []const u8 = "expected a comparison, one of";
+    for (std.enums.values(relation.Op)) |op| message = message ++ " " ++ op.symbol();
+    break :blk message;
+};
+
 const Parser = struct {
     src: []const u8,
     pos: usize = 0,
     b: *expr.Builder,
     diag: ?*Diagnostic,
+    /// Nesting of the recursive descent; see `max_depth`.
+    depth: u32 = 0,
 
     fn fail(self: *Parser, message: []const u8) Error {
-        if (self.diag) |d| d.* = .{ .offset = @min(self.pos, self.src.len), .message = message };
-        return error.ParseFailed;
+        return failAt(self.diag, @min(self.pos, self.src.len), message);
     }
 
     fn skipSpace(self: *Parser) void {
@@ -68,21 +110,13 @@ const Parser = struct {
         return false;
     }
 
-    fn relationOp(self: *Parser) Error!relation.Op {
-        const c = self.peek() orelse return self.fail("expected one of = < <= > >=");
-        self.pos += 1;
-        switch (c) {
-            '=' => {
-                _ = self.eat('='); // tolerate `==`
-                return .eq;
-            },
-            '<' => return if (self.eat('=')) .le else .lt,
-            '>' => return if (self.eat('=')) .ge else .gt,
-            else => {
-                self.pos -= 1;
-                return self.fail("expected one of = < <= > >=");
-            },
-        }
+    fn comparison(self: *Parser) Error!relation.Op {
+        self.skipSpace();
+        const found = comparisons.getLongestPrefix(self.src[self.pos..]) orelse
+            return self.fail(expected_comparison);
+        self.pos += found.key.len;
+        if (found.value == .eq) _ = self.eat('='); // tolerate `==`
+        return found.value;
     }
 
     fn expression(self: *Parser) Error!expr.Index {
@@ -121,7 +155,14 @@ const Parser = struct {
         return lhs;
     }
 
+    /// Every descent into a nested expression - a sign, a parenthesis, a
+    /// function argument - passes through here, so counting depth here bounds
+    /// the whole recursion.
     fn unary(self: *Parser) Error!expr.Index {
+        if (self.depth == max_depth) return self.fail("nested too deeply");
+        self.depth += 1;
+        defer self.depth -= 1;
+
         if (self.eat('-')) return self.b.call(.neg, try self.unary());
         if (self.eat('+')) return self.unary();
         return self.power();
@@ -203,9 +244,18 @@ const Parser = struct {
             self.pos = start;
             return self.fail("expected '(' after a function name");
         }
-        const arg = try self.expression();
+
+        const first = try self.expression();
+        if (tag.arity() == 1) {
+            if (self.peek() == ',') return self.fail("this function takes one argument");
+            if (!self.eat(')')) return self.fail("expected ')'");
+            return self.b.unary(tag, first);
+        }
+
+        if (!self.eat(',')) return self.fail("this function takes two arguments, separated by a comma");
+        const second = try self.expression();
         if (!self.eat(')')) return self.fail("expected ')'");
-        return self.b.call(tag, arg);
+        return self.b.binary(tag, first, second);
     }
 };
 
@@ -217,15 +267,14 @@ const aliases = std.StaticStringMap(expr.Tag).initComptime(.{
     .{ "arctan", .atan },
 });
 
-/// Every unary operator is callable under its own name, so `expr.Tag` is the
-/// single source of truth for what the language has: adding an operator there
-/// makes it parseable, with no table here to keep in step.
+/// Every callable operator is callable under its own name, so `expr.Tag` is
+/// the single source of truth for what the language has: adding an operator
+/// there makes it writable, with no table here to keep in step. `Tag.isCallable`
+/// is the one place that says which spelling an operator gets.
 fn functionTag(name: []const u8) ?expr.Tag {
     if (aliases.get(name)) |tag| return tag;
     const tag = std.meta.stringToEnum(expr.Tag, name) orelse return null;
-    // `powi` needs an exponent rather than an argument, and nothing of another
-    // arity is written `name(arg)`.
-    return if (tag.arity() == 1 and tag != .powi) tag else null;
+    return if (tag.isCallable()) tag else null;
 }
 
 const testing = std.testing;
@@ -293,6 +342,111 @@ test "errors carry a position" {
     try testing.expectError(error.ParseFailed, relationFrom(testing.allocator, "wat(x) = y", &diag));
     try testing.expectError(error.ParseFailed, relationFrom(testing.allocator, "x = y extra", &diag));
     try testing.expectError(error.ParseFailed, relationFrom(testing.allocator, "x^y = 0", &diag));
+}
+
+test "moving a term across the comparison changes nothing" {
+    const a = testing.allocator;
+    const eval = @import("eval.zig");
+    const Interval = @import("interval.zig").Interval(1);
+
+    // `f > 1` and `f - 1 > 0` are the same relation, and normalising both to
+    // `f op 0` makes them the same computation rather than merely equivalent
+    // ones: the second's `- 0` is the identity `Builder.sub` declines, so the
+    // two enclose a box *identically* instead of one of them paying a rounding
+    // for the detour. Anything less and the choice of spelling would show up
+    // in the picture.
+    var moved = try relationFrom(a, "x^2 - 1 > 0", null);
+    defer moved.deinit(a);
+    var direct = try relationFrom(a, "x^2 > 1", null);
+    defer direct.deinit(a);
+
+    try testing.expectEqual(direct.op, moved.op);
+
+    var em: eval.Evaluator(Interval) = try .init(a, &moved.program);
+    defer em.deinit(a);
+    var ed: eval.Evaluator(Interval) = try .init(a, &direct.program);
+    defer ed.deinit(a);
+
+    const xs = Interval.repeat(-0.5, 2.25);
+    const ys = Interval.repeat(-1, 1);
+    const got = em.eval(moved.root, xs, ys);
+    const want = ed.eval(direct.root, xs, ys);
+    try testing.expectEqual(want.lo[0], got.lo[0]);
+    try testing.expectEqual(want.hi[0], got.hi[0]);
+
+    // The written-out zero is interned before `sub` gets to decline it, so it
+    // stays in the array as a leaf nothing refers to: one `splat` in the
+    // evaluation loop, and no operand of anything.
+    try testing.expectEqual(direct.program.nodes.len + 1, moved.program.nodes.len);
+}
+
+test "functions of two arguments" {
+    try testing.expectApproxEqAbs(@as(f64, 3), (try evalAt("max(x, y) = 0", 3, 1)).v, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 1), (try evalAt("min(x, y) = 0", 3, 1)).v, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 1), (try evalAt("mod(x, 3) = 0", 7, 0)).v, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, -2), (try evalAt("mod(x, -3) = 0", 7, 0)).v, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 1), (try evalAt("floor(x) = 0", 1.7, 0)).v, 1e-12);
+    // Nesting and whitespace around the comma.
+    try testing.expectApproxEqAbs(@as(f64, 2), (try evalAt("max(min(x,y) , 2) = 0", 1, 5)).v, 1e-12);
+}
+
+test "the arity in the enum is the arity the parser enforces" {
+    var diag: Diagnostic = .{};
+    try testing.expectError(error.ParseFailed, relationFrom(testing.allocator, "max(x) = 0", &diag));
+    try testing.expect(std.mem.indexOf(u8, diag.message, "two arguments") != null);
+
+    diag = .{};
+    try testing.expectError(error.ParseFailed, relationFrom(testing.allocator, "sin(x, y) = 0", &diag));
+    try testing.expect(std.mem.indexOf(u8, diag.message, "one argument") != null);
+
+    // The operators that have an infix spelling do not also get a call
+    // spelling, so there is one way to write each of them.
+    for ([_][]const u8{ "add(x, y) = 0", "mul(x, y) = 0", "powi(x, 2) = 0", "constant(1) = 0" }) |source| {
+        diag = .{};
+        try testing.expectError(error.ParseFailed, relationFrom(testing.allocator, source, &diag));
+        try testing.expectEqualStrings("unknown name", diag.message);
+    }
+}
+
+test "the message listing the comparisons is generated from the enum" {
+    var diag: Diagnostic = .{};
+    try testing.expectError(error.ParseFailed, relationFrom(testing.allocator, "x + y", &diag));
+    try testing.expectEqualStrings(expected_comparison, diag.message);
+    try testing.expectEqualStrings("expected a comparison, one of = < <= > >=", expected_comparison);
+
+    // Longest match first: `<=` is one comparison, not `<` followed by junk.
+    try testing.expectEqual(relation.Op.le, (try evalAt("x <= y", 0, 0)).op);
+    try testing.expectEqualStrings("<=", comparisons.getLongestPrefix("<= 0").?.key);
+    try testing.expect(comparisons.getLongestPrefix("~ 0") == null);
+}
+
+test "nesting is bounded rather than overflowing the stack" {
+    const a = testing.allocator;
+    const over = max_depth + 1;
+
+    var diag: Diagnostic = .{};
+    const nested = ("(" ** over) ++ "x" ++ (")" ** over) ++ " = 0";
+    try testing.expectError(error.ParseFailed, relationFrom(a, nested, &diag));
+    try testing.expectEqualStrings("nested too deeply", diag.message);
+
+    // A chain of signs recurses without a parenthesis and is bounded too.
+    try testing.expectError(error.ParseFailed, relationFrom(a, ("-" ** over) ++ "x = 0", &diag));
+
+    // One level inside the limit still parses.
+    const fine = ("(" ** (max_depth - 1)) ++ "x" ++ (")" ** (max_depth - 1)) ++ " = 0";
+    var rel = try relationFrom(a, fine, null);
+    rel.deinit(a);
+}
+
+test "source longer than the cap is rejected unread" {
+    const a = testing.allocator;
+    const long = try a.alloc(u8, max_source + 1);
+    defer a.free(long);
+    @memset(long, 'x');
+
+    var diag: Diagnostic = .{};
+    try testing.expectError(error.ParseFailed, relationFrom(a, long, &diag));
+    try testing.expectEqualStrings("relation too long", diag.message);
 }
 
 test "hash consing survives parsing" {

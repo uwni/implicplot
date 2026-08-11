@@ -32,7 +32,6 @@ pub const png = @import("png.zig");
 pub const plot = @import("plot.zig");
 pub const dual = @import("dual.zig");
 pub const contour = @import("contour.zig");
-pub const bytecode = @import("bytecode.zig");
 
 pub const Interval = interval.Interval;
 pub const Op = interval.Op;

@@ -9,7 +9,7 @@ $ ./zig-out/bin/implicit-plot "sin(x^2 + y^2) = cos(x*y)"
 sin(x^2 + y^2) = cos(x*y)
   1024 x 1024 px over x in [-10, 10], y in [-10, 10]
   wrote plot.png
-  69544 of 1048576 pixels lit in 24.1ms
+  137336 of 1048576 pixels lit in 37.8ms
 ```
 
 `zig build run -- --help` lists the options: image size, ranges, output path,
@@ -48,7 +48,10 @@ Three decisions carry most of the design:
 **Every relation is `f(x, y) op 0`.** For an interval, `[a,b] - [c,d]` contains
 zero exactly when `[a,b]` and `[c,d]` overlap, so the difference decides the
 relation as precisely as comparing the sides - and the verdict, the definedness
-test and the continuity test then all come out of a single evaluation.
+test and the continuity test then all come out of a single evaluation. Writing
+a relation against zero costs nothing: `Builder.sub` declines to subtract `+0`,
+so `f > 1` and `f - 1 > 0` are one program rather than two equivalent ones, and
+moving a term across the comparison cannot change the picture.
 
 **The program is a DAG evaluated by one forward loop.** Operands precede their
 parents, so `for (nodes) |n| values[i] = ...` computes each node exactly once and
@@ -72,14 +75,16 @@ typst compile typst/manual.typ
 
 ```typst
 #import "plot.typ" as ip
-#let f = ip.sub(
-  ip.sin(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2))),
-  ip.cos(ip.mul(ip.x, ip.y)),
-)
+#let f = "sin(x^2 + y^2) = cos(x*y)"
 
-#let pixels = ip.plot(f, rel: "eq", size: (8, 8), x: (-1, 1), y: (-1, 1))
+#let pixels = ip.plot(f, size: (8, 8), x: (-1, 1), y: (-1, 1))
 #let chains = ip.contour(f, n: 60, x: (-8, 8), y: (-8, 8))
 ```
+
+The relation is one string with its comparison inside it, in the same language
+the command line takes, and `plot` and `contour` accept the same one. `contour`
+consults only the two sides, since tracing asks where they are equal: `"f <= 1"`
+traces the boundary `"f = 1"`.
 
 Two questions, two answers, and neither is an image:
 
@@ -121,41 +126,36 @@ staircase fragments where tracing the field gives one loop.
 ### Wire format
 
 The plugin speaks the
-[wasm minimal protocol](https://github.com/typst-community/wasm-minimal-protocol)
-and takes a relation as a *postfix opcode stream*: one opcode byte per
-instruction, followed by its immediate operand, each instruction pushing one
-value. `sin(x^2 + y^2) - cos(x*y)` is
-
-```text
-x  powi 2  y  powi 2  add  sin  x  y  mul  cos  sub
-```
-
-| opcode | | immediate | stack |
-| --- | --- | --- | --- |
-| `constant` | 0 | f64, 8 bytes LE | push |
-| `x`, `y` | 1, 2 | - | push |
-| `neg` .. `atan` | 3 .. 13 | - | pop 1, push 1 |
-| `powi` | 14 | i32, 4 bytes LE | pop 1, push 1 |
-| `add` .. `div` | 15 .. 18 | - | pop 2, push 1 |
-
-Postfix is not a third representation of an expression - it *is* the node array
-of `expr.zig` read out in order, so decoding is a single pass with no tree to
-build and the topological invariant holds by construction.
-
-Every call also takes 43 little-endian bytes of options: relation opcode
-(`eq` 0, `lt` 1, `le` 2, `gt` 3, `ge` 4), width and height as `u32`, the four
-range bounds as `f64`, a depth byte (`plot`: sub-pixel
-refinement; `contour`: extra refinement below the requested resolution, default
-2), and one final byte only
+[wasm minimal protocol](https://github.com/typst-community/wasm-minimal-protocol).
+Both exports take two arguments: the relation as UTF-8 source text, and 42
+little-endian bytes of options - width and height as `u32`, the four range
+bounds as `f64`, a depth byte (`plot`: sub-pixel refinement; `contour`: extra
+refinement below the requested resolution, default 2), and one final byte only
 `contour` reads: the uncertain-cell policy, 0 to keep arcs apart, 1 to contract
 each uncertain cluster to a junction. The curve has values in those cells - they
 sit on the curve - but the gradient vanishes there, so how the arcs connect is
 not computable; the byte is the caller saying which reading their relation
 warrants (a factorable relation genuinely crosses; a near miss does not).
 
-`opcodes()` returns the whole table as text, generated from the Zig enums, so
-`plot.typ` reads the numbers at import time rather than keeping a copy. Nothing
-outside `expr.Tag` and `interval.Op` assigns an operator a number.
+The relation crosses as text because the parser is already there: `parse.zig`,
+the one the command line uses. Nothing then identifies an operator by number -
+`expr.Tag` and `interval.Op` have no numeric values, a function is spelled by
+its own tag name and a comparison by `Op.symbol`, and the parser builds both its
+tables and its error messages from those. So an operator is written down in
+exactly one place, `plot.typ` has no table to keep in step with the Zig enums,
+and adding one makes it writable in a document at once.
+
+A relation that does not parse comes back as the protocol's failure message, as
+does one over 64 KiB or nested past 256 levels - limits the parser has because
+a document is untrusted input and freestanding wasm, with panics compiled out,
+would otherwise trap without a word. The message is the caret report the command
+line prints:
+
+```text
+error: plugin errored with: unknown name
+  sin(x^2 + y^2) = cos(x*z)
+                         ^
+```
 
 ## Differences from the JavaScript original
 

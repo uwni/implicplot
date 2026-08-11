@@ -67,6 +67,12 @@ pub const Reading = struct {
     dec: Decoration,
 };
 
+/// The values of `f` at the four corners of a box, one per lane, in the order
+/// (x0,y0) (x0,y1) (x1,y0) (x1,y1). The plotter's refinement threads these
+/// down its recursion: a quartered box shares five of its children's corners
+/// with the parent, so the children never re-evaluate them.
+pub const Corners = R4.F;
+
 /// Per-worker scratch for asking questions about boxes. All allocation happens
 /// here, once, never in the recursion.
 pub const Prober = struct {
@@ -109,34 +115,56 @@ pub const Prober = struct {
         return out;
     }
 
-    /// Try to *prove* that the box contains a solution, by sampling. All four
-    /// corners are evaluated in a single vector pass.
+    /// Evaluate `f` at four arbitrary points, one per lane.
+    pub fn evalPoints(self: *Prober, xs: R4.F, ys: R4.F) R4.F {
+        return self.corners.eval(self.rel.root, .init(xs), .init(ys)).v;
+    }
+
+    /// The corner samples of a box, in the lane order `Corners` documents.
+    pub fn cornerValues(self: *Prober, rect: Rect) Corners {
+        return self.evalPoints(
+            .{ rect.x0, rect.x0, rect.x1, rect.x1 },
+            .{ rect.y0, rect.y1, rect.y0, rect.y1 },
+        );
+    }
+
+    /// Do these corner samples *prove* that the box contains a solution?
     ///
     /// For an inequality one satisfying sample is a proof. For an equality we
     /// need the intermediate value theorem, which requires `f` to be defined
     /// and pole-free on the box - hence the `Reading` argument.
-    pub fn hasSolution(self: *Prober, rect: Rect, r: Reading) bool {
-        const xs = R4.init(.{ rect.x0, rect.x0, rect.x1, rect.x1 });
-        const ys = R4.init(.{ rect.y0, rect.y1, rect.y0, rect.y1 });
-        const v: [4]f64 = self.corners.eval(self.rel.root, xs, ys).v;
+    ///
+    /// The corners stay in the vector they were computed in: every question
+    /// below is "does any lane ...", which is one comparison and one
+    /// reduction rather than four scalar tests and four branches. No question
+    /// cares which lane is which corner.
+    pub fn provenBy(self: *const Prober, r: Reading, v: Corners) bool {
+        const zero: R4.F = @splat(0);
 
-        if (self.rel.op != .eq) {
-            for (v) |sample| {
-                if (!std.math.isNan(sample) and self.rel.op.holds(sample)) return true;
-            }
-            return false;
-        }
+        // For an inequality one satisfying corner is the whole proof.
+        if (self.rel.op != .eq) return self.rel.op.holdsAny(v);
 
+        // A sample that *is* zero proves a solution by itself - it is a point
+        // of the box where the relation holds, and reading that off involves no
+        // intermediate value theorem and so needs no continuity. This is the
+        // only thing that finds a solution of a step relation like
+        // `mod(x, 2) = 0`, whose zero set is a set of isolated lines that the
+        // sign-change argument below can never certify.
+        if (@reduce(.Or, v == zero)) return true;
+
+        // Everything else rests on the intermediate value theorem, which wants
+        // `f` defined and pole-free across the whole box, and a sign change
+        // between two corners that are really there.
         if (!r.dec.isContinuous()) return false;
-        var positive = false;
-        var negative = false;
-        for (v) |sample| {
-            if (std.math.isNan(sample)) return false;
-            if (sample == 0) return true;
-            positive = positive or sample > 0;
-            negative = negative or sample < 0;
-        }
-        return positive and negative;
+        if (@reduce(.Or, v != v)) return false;
+        return @reduce(.Or, v > zero) and @reduce(.Or, v < zero);
+    }
+
+    /// `cornerValues` and `provenBy` in one step. The plotter's refinement
+    /// calls the halves separately, because it inherits most corner values
+    /// from the box it split and only samples the points it lacks.
+    pub fn hasSolution(self: *Prober, rect: Rect, r: Reading) bool {
+        return self.provenBy(r, self.cornerValues(rect));
     }
 };
 

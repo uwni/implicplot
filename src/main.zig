@@ -15,7 +15,9 @@ const usage =
     \\
     \\Draws the set of points satisfying a relation, using interval arithmetic.
     \\The relation may use x, y, + - * / ^, parentheses, the constants pi, tau
-    \\and e, and the functions sin cos tan exp sqrt log/ln abs asin acos atan.
+    \\and e, the functions abs neg sin cos tan exp sqrt log/ln asin acos atan
+    \\floor ceil, and min(a,b) max(a,b) mod(a,b). Multiplication is never
+    \\implicit: write 2*x, not 2x.
     \\
     \\options:
     \\  -o, --out <path>     PNG to write, or "-" for none        (default plot.png)

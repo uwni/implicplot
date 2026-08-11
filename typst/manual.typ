@@ -1,7 +1,7 @@
 // Manual for the implicit-plot Typst plugin.
 //
-// Imports are namespaced: `plot.typ` exports `x`, `y`, `sin`, `cos` and
-// related names, which would otherwise shadow the same names inside math mode.
+// Imports are namespaced: the module exports `plot`, `contour` and `rows`,
+// names generic enough that a snippet should say which package they came from.
 //
 // Each figure is shown as source next to its rendered result, via tidy's
 // example machinery. The snippets are evaluated during the build, so a snippet
@@ -40,14 +40,15 @@
 = Implicplot
 
 The module provides two entry points, which answer different questions about a
-relation. `plot` determines *which pixels the relation may touch* and returns a
-raster of one byte per pixel, computed by adaptive subdivision; it is rigorous
-and can fill an inequality. It implements the reliable-graphing method of
-Tupper @tupper2001. `contour` determines *where the curve is* and returns
-polylines with a guaranteed topology, by the subdivision approach of Plantinga
-& Vegter @plantinga-vegter2004 with the stopping rule of Lin & Yap
-@lin-yap2011. Neither returns an image: both return data, and the document
-decides how to render it.
+relation written as one string, comparison included:
+`sin(x^2 + y^2) = cos(x*y)`. `plot` determines *which pixels the relation may
+touch* and returns a raster of one byte per pixel, computed by adaptive
+subdivision; it is rigorous and can fill an inequality. It implements the
+reliable-graphing method of Tupper @tupper2001. `contour` determines *where the
+curve is* and returns polylines with a guaranteed topology, by the subdivision
+approach of Plantinga & Vegter @plantinga-vegter2004 with the stopping rule of
+Lin & Yap @lin-yap2011. Neither returns an image: both return data, and the
+document decides how to render it.
 
 Each figure below is shown next to its source. The snippets assume
 `#import "plot.typ" as ip` and four drawing helpers from `manual-helpers.typ`,
@@ -63,9 +64,60 @@ place(curve(
 ))
 ```
 
+== What a relation may say
+
+A relation is two expressions with a comparison between them --- one of
+`=`, `<`, `<=`, `>`, `>=`, where `==` is also accepted for `=`. Which side is
+which does not matter: everything is reduced to $f space.thin op space.thin 0$
+before it is plotted, and the subtraction of a literal zero is dropped, so
+`"f > 1"` and `"f - 1 > 0"` are not merely equivalent but the same program.
+
+An expression is built from $x$ and $y$, the constants `pi`, `tau` and `e`,
+decimal literals (`0.5`, `.5` and `1.5e3` all read), the operators
+`+ - * /` with a leading `-` for negation, parentheses, and `^`. Whitespace is
+insignificant. The functions are
+
+```text
+abs  neg  sin  cos  tan  exp  sqrt  log  asin  acos  atan  floor  ceil
+min(a, b)   max(a, b)   mod(a, b)
+```
+
+with `ln`, `arcsin`, `arccos` and `arctan` as alternative spellings of four of
+them. That is the whole list, and it is not really a list: a name is looked up
+directly in the evaluator's operator enum, so the language has exactly the
+operations the two arithmetic domains implement and cannot come to disagree
+with them.
+
+`mod` is floored, taking the sign of its divisor as Python's `%` does, so
+`mod(7, -3)` is $-2$. `floor`, `ceil` and `mod` are the only operations here
+that are not continuous, and the step is not swept under the carpet: a cell whose image
+crosses one is marked discontinuous in the arithmetic itself, `contour` refuses
+to trace through it and counts it in `uncertain`, and `plot` --- which needs
+only the enclosure, never continuity --- is unaffected. Expect
+`contour("mod(x, 3) = 1")` to report a positive `uncertain`; the vertical lines
+it does return are still correct.
+
+Two restrictions are worth knowing before they surprise you. There is *no
+implicit multiplication* --- `2x` and `x y` are errors, and mean `2*x` and
+`x*y`. And `^` takes an *integer literal* only: `x^2` and `e^-1` are fine,
+`x^y` and `x^0.5` are not. The restriction is not laziness but the reason the
+plotter converges: a power is a single operation that knows its argument
+occurs once, enclosing $[-1,1]^2$ as $[0,1]$, where $x dot x$ must assume the
+two factors are independent and can only manage $[-1,1]$. Use `sqrt` for a
+square root and `exp(y * log(x))` if a variable exponent is really meant.
+
+Anything else is refused with the offending character marked, which Typst
+reports at the call site:
+
+```text
+error: plugin errored with: unknown name
+  sin(x^2 + y^2) = cos(x*z)
+                         ^
+```
+
 == `plot`: one byte per pixel
 
-#let half = ip.plot(ip.x, rel: "lt", size: (8, 8), x: (-1, 1), y: (-1, 1))
+#let half = ip.plot("x < 0", size: (8, 8), x: (-1, 1), y: (-1, 1))
 #assert.eq(half.len(), 64)
 #for row in ip.rows(half, 8) { assert.eq(row, (1, 1, 1, 1, 0, 0, 0, 0)) }
 
@@ -74,27 +126,22 @@ row-major from the top:
 
 #demo(dir: ltr, ```typ
 #raw(ip.rows(
-  ip.plot(ip.x, rel: "lt", size: (8, 8), x: (-1, 1), y: (-1, 1)),
+  ip.plot("x < 0", size: (8, 8),
+    x: (-1, 1), y: (-1, 1)),
   8).map(row => row.map(str).join(" ")).join("\n"))
 ```)
 
 An inequality yields a filled region, which is what the raster represents:
 
 #demo(```typ
-#let region = ip.sub(
-  ip.sin(ip.sub(ip.pow(ip.x, 2), ip.pow(ip.y, 2))),
-  ip.add(ip.sin(ip.add(ip.x, ip.y)), ip.cos(ip.mul(ip.x, ip.y))),
-)
-#art(ip.plot(region, rel: "lt", size: (76, 30), x: (-4, 4), y: (-2, 2)), 76)
+#art(ip.plot("sin(x^2 - y^2) < sin(x + y) + cos(x*y)",
+  size: (76, 30), x: (-4, 4), y: (-2, 2)), 76)
 ```)
 
 == `contour`: the curve as polylines
 
 #let circles = ip.contour(
-  ip.mul(
-    ip.sub(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2)), ip.num(4)),
-    ip.sub(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2)), ip.num(1)),
-  ),
+  "(x^2 + y^2 - 4) * (x^2 + y^2 - 1) = 0",
   n: 80, x: (-3, 3), y: (-3, 3),
 )
 #assert.eq(circles.chains.len(), 2)
@@ -106,10 +153,7 @@ with the even-odd fill rule, which fills the annulus $1 <= x^2 + y^2 <= 4$
 including the hole. The output is vector; no raster is involved:
 
 #demo(```typ
-#let rings = ip.mul(
-  ip.sub(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2)), ip.num(4)),
-  ip.sub(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2)), ip.num(1)),
-)
+#let rings = "(x^2 + y^2 - 4) * (x^2 + y^2 - 1) = 0"
 #let circles = ip.contour(rings, n: 80, x: (-3, 3), y: (-3, 3))
 #grid(columns: 2, gutter: 0.6cm,
   box(width: 6cm, height: 6cm,
@@ -128,7 +172,7 @@ interpolating across it produces a segment that is not part of the curve.
 @ieee1788) and rejects cells across which the relation is not continuous, so
 $y = tan(x)$ produces no segment at its asymptotes:
 
-#let tangent = ip.contour(ip.sub(ip.y, ip.tan(ip.x)), n: 90, x: (-5, 5), y: (-4, 4))
+#let tangent = ip.contour("y = tan(x)", n: 90, x: (-5, 5), y: (-4, 4))
 #{
   // Every returned point must lie on the curve. Measured as a distance, not a
   // residual: |y - tan x| grows with the slope, so it says nothing about how
@@ -144,8 +188,7 @@ $y = tan(x)$ produces no segment at its asymptotes:
 }
 
 #demo(```typ
-#let tangent = ip.contour(ip.sub(ip.y, ip.tan(ip.x)),
-  n: 90, x: (-5, 5), y: (-4, 4))
+#let tangent = ip.contour("y = tan(x)", n: 90, x: (-5, 5), y: (-4, 4))
 #box(width: 6cm, height: 6cm,
   stroke-chains(tangent.chains, (-5, 5), 6cm))
 ```)
@@ -163,18 +206,12 @@ guarantee means no part of the region is omitted --- and `contour` strokes the
 boundary, which is the zero set of the corresponding equality and stays sharp
 at any zoom:
 
-#let g = ip.sub(
-  ip.sin(ip.sub(ip.pow(ip.x, 2), ip.pow(ip.y, 2))),
-  ip.add(ip.sin(ip.add(ip.x, ip.y)), ip.cos(ip.mul(ip.x, ip.y))),
-)
+#let g = "sin(x^2 - y^2) < sin(x + y) + cos(x*y)"
 #let g-edge = ip.contour(g, n: 120, x: (-4, 4), y: (-4, 4))
 
 #demo(```typ
-#let g = ip.sub(
-  ip.sin(ip.sub(ip.pow(ip.x, 2), ip.pow(ip.y, 2))),
-  ip.add(ip.sin(ip.add(ip.x, ip.y)), ip.cos(ip.mul(ip.x, ip.y))),
-)
-#let g-fill = ip.plot(g, rel: "lt", size: (150, 150), x: (-4, 4), y: (-4, 4))
+#let g = "sin(x^2 - y^2) < sin(x + y) + cos(x*y)"
+#let g-fill = ip.plot(g, size: (150, 150), x: (-4, 4), y: (-4, 4))
 #let g-edge = ip.contour(g, n: 120, x: (-4, 4), y: (-4, 4))
 #box(width: 8cm, height: 8cm, {
   fill-runs(g-fill, 150, 8cm)
@@ -182,9 +219,10 @@ at any zoom:
 })
 ```)
 
-The two results agree because both derive from the same $f$: the region is
-$f < 0$ and its boundary is $f = 0$. Where the boundary has singular points,
-`contour` reports them rather than guessing --- #g-edge.uncertain cells here.
+The two results agree because both are handed the same string: `plot` reads its
+comparison and fills $f < 0$, `contour` ignores the comparison and traces the
+boundary $f = 0$. Where that boundary has singular points, `contour` reports
+them rather than guessing --- #g-edge.uncertain cells here.
 
 This figure uses a raster fill rather than the vector fill used for the
 annulus, because the region leaves the window on all four sides and most of its
@@ -196,18 +234,11 @@ raster answers the region query directly and errs outward, never inward.
 == Gallery
 
 #demo(```typ
-#let heart = ip.sub(
-  ip.pow(ip.sub(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2)), ip.num(1)), 3),
-  ip.mul(ip.pow(ip.x, 2), ip.pow(ip.y, 3)),
-)
-#let heart-edge = ip.contour(heart, n: 100, x: (-1.5, 1.5), y: (-1.4, 1.6))
-#let lemniscate-edge = ip.contour(
-  ip.sub(ip.pow(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2)), 2),
-    ip.sub(ip.pow(ip.x, 2), ip.pow(ip.y, 2))),
+#let heart-edge = ip.contour("(x^2 + y^2 - 1)^3 <= x^2*y^3",
+  n: 100, x: (-1.5, 1.5), y: (-1.4, 1.6))
+#let lemniscate-edge = ip.contour("(x^2 + y^2)^2 = x^2 - y^2",
   n: 80, x: (-1.2, 1.2), y: (-1.2, 1.2))
-#let folium-edge = ip.contour(
-  ip.sub(ip.pow(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2)), 2),
-    ip.sub(ip.pow(ip.x, 3), ip.mul(ip.num(3), ip.mul(ip.x, ip.pow(ip.y, 2))))),
+#let folium-edge = ip.contour("(x^2 + y^2)^2 = x^3 - 3*x*y^2",
   n: 80, x: (-1, 1.2), y: (-1.1, 1.1))
 #let pink = rgb("#d42873")
 #grid(columns: (4.6cm,) * 3, gutter: 0.5cm,
@@ -244,18 +275,12 @@ reliable as the boundary's topology.
 
 == Guarantees and their limits
 
-#let f = ip.sub(
-  ip.sin(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2))),
-  ip.cos(ip.mul(ip.x, ip.y)),
-)
+#let f = "sin(x^2 + y^2) = cos(x*y)"
 #let traced = ip.contour(f, n: 120, x: (-8, 8), y: (-8, 8), refine: 2)
 
 #demo(```typ
-#let f = ip.sub(
-  ip.sin(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2))),
-  ip.cos(ip.mul(ip.x, ip.y)),
-)
-#let pixels = ip.plot(f, rel: "eq", size: (120, 120), x: (-8, 8), y: (-8, 8))
+#let f = "sin(x^2 + y^2) = cos(x*y)"
+#let pixels = ip.plot(f, size: (120, 120), x: (-8, 8), y: (-8, 8))
 #let traced = ip.contour(f, n: 120, x: (-8, 8), y: (-8, 8), refine: 4)
 #grid(columns: 2, gutter: 0.6cm,
   box(width: 7.5cm, height: 7.5cm,
@@ -293,10 +318,7 @@ crossing is in fact a near miss. Here the factorisation shows otherwise, so
 junction and the arcs meet in an X:
 
 #demo(```typ
->>>#let f = ip.sub(
->>>  ip.sin(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2))),
->>>  ip.cos(ip.mul(ip.x, ip.y)),
->>>)
+>>>#let f = "sin(x^2 + y^2) = cos(x*y)"
 #let avoid = ip.contour(f, n: 120, x: (-8, 8), y: (-8, 8))
 #let join = ip.contour(f, n: 120, x: (-8, 8), y: (-8, 8),
   uncertain: "join")
@@ -328,22 +350,17 @@ merely approach each other.
 
 == Writing relations efficiently
 
-#let tan-cleared = ip.contour(
-  ip.sub(ip.sin(ip.x), ip.mul(ip.y, ip.cos(ip.x))),
+#let tan-cleared = ip.contour("sin(x) = y*cos(x)",
   n: 90, x: (-5, 5), y: (-4, 4))
-#let hyper-factored = ip.contour(
-  ip.sub(ip.mul(
-    ip.add(ip.mul(ip.num(20), ip.y), ip.x),
-    ip.sub(ip.mul(ip.num(20), ip.y), ip.x)), ip.num(1)),
+#let hyper-factored = ip.contour("(20*y + x) * (20*y - x) = 1",
   n: 64, x: (-5, 11), y: (-1, 15))
-#let hyper-expanded = ip.contour(
-  ip.sub(ip.sub(ip.mul(ip.num(400), ip.pow(ip.y, 2)), ip.pow(ip.x, 2)), ip.num(1)),
+#let hyper-expanded = ip.contour("400*y^2 - x^2 = 1",
   n: 64, x: (-5, 11), y: (-1, 15))
 
 The numbers quoted below are computed during this build, so they describe the
 document you are reading.
 
-*If a parametric form exists, use it directly; this plugin is not needed.* An
+*If a parametric form exists, use it directly; this plugin is NOT needed.* An
 implicit plotter is required only when the relation cannot be solved for a
 parameter. A Lissajous figure is awkward as an implicit equation and
 straightforward as a parameter sweep: every sampled point lies exactly on the
@@ -365,16 +382,17 @@ its pole columns. Written as `sin(x) = y * cos(x)` the relation is analytic and
 has the identical zero set, and it traces with *#tan-cleared.uncertain*
 uncertain cells --- the full guarantee, from a one-line rewrite.
 
-*Write powers as powers.* `pow(x, 2)` encloses $[-1,1]^2$ as $[0, 1]$, whereas
-`mul(x, x)` cannot know that its two arguments are the same variable and
-obtains $[-1, 1]$. Tighter enclosures reduce the number of subdivisions
-wherever a curve is plotted or traced.
+*Write powers as powers.* `x^2` encloses $[-1,1]^2$ as $[0, 1]$, whereas `x*x`
+cannot know that its two factors are the same variable and obtains $[-1, 1]$.
+Tighter enclosures reduce the number of subdivisions wherever a curve is
+plotted or traced.
 
 *Expanded and factored forms differ in cost; measure both.* Interval arithmetic
 treats each occurrence of a variable independently, so the same curve costs
-differently depending on how it is written. The hyperbola `(20y + x)(20y - x) = 1`
-traces with #hyper-factored.chains.map(c => c.len()).sum() points and
-#hyper-factored.uncertain uncertain cells. Expanded to `400 y^2 - x^2 = 1`, the
+differently depending on how it is written. The hyperbola
+`(20*y + x) * (20*y - x) = 1` traces with
+#hyper-factored.chains.map(c => c.len()).sum() points and
+#hyper-factored.uncertain uncertain cells. Expanded to `400*y^2 - x^2 = 1`, the
 derivative enclosures reduce to the exact $-2x$ and $800y$, and the same window
 costs #hyper-expanded.chains.map(c => c.len()).sum() points with
 #hyper-expanded.uncertain uncertain. A product form `g * h = 0`, on the other
@@ -394,8 +412,7 @@ context: ticks placed at multiples of $pi/2$ fall exactly on the asymptotes and
 label where the curve stops:
 
 #demo(```typ
->>>#let tangent = ip.contour(ip.sub(ip.y, ip.tan(ip.x)),
->>>  n: 90, x: (-5, 5), y: (-4, 4))
+>>>#let tangent = ip.contour("y = tan(x)", n: 90, x: (-5, 5), y: (-4, 4))
 #cetz.canvas({
   cplot.plot(
     size: (13, 6),
@@ -418,13 +435,8 @@ returned --- the lemniscate decomposes into two lobes that separate at the
 self-intersection --- with the `uncertain` count in the title:
 
 #demo(```typ
-#let lemniscate = ip.contour(
-  ip.sub(
-    ip.pow(ip.add(ip.pow(ip.x, 2), ip.pow(ip.y, 2)), 2),
-    ip.sub(ip.pow(ip.x, 2), ip.pow(ip.y, 2)),
-  ),
-  n: 80, x: (-1.2, 1.2), y: (-0.7, 0.7),
-)
+#let lemniscate = ip.contour("(x^2 + y^2)^2 = x^2 - y^2",
+  n: 80, x: (-1.2, 1.2), y: (-0.7, 0.7))
 #lq.diagram(
   width: 11cm, height: 6.4cm,
   xlabel: $x$, ylabel: $y$,
