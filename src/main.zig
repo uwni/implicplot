@@ -4,13 +4,57 @@
 //! general purpose allocator with leak checking in debug builds, and an `Io`
 //! implementation already wired to a thread pool - none of which has to be
 //! constructed, torn down, or leak-checked by hand.
+//!
+//! Argument parsing is zig-clap's: the option table below is the single
+//! statement of the interface, and the help text, the parser and the struct
+//! of results are all derived from it.
 
 const std = @import("std");
+const clap = @import("clap");
 const irp = @import("implicit_plot");
 
 const default_source = "sin(x^2 + y^2) = cos(x*y)";
 
-const usage =
+const params = clap.parseParamsComptime(
+    \\-o, --out <path>     PNG to write, or "-" for none (default plot.png)
+    \\-s, --size <WxH>     image size in pixels (default 1024x1024)
+    \\-x, --xrange <a:b>   horizontal range (default -10:10)
+    \\-y, --yrange <a:b>   vertical range (default -10:10)
+    \\-d, --depth <n>      sub-pixel refinement depth (default 8)
+    \\-j, --tasks <n>      parallel row strips (default 8 per CPU)
+    \\-a, --ascii          also print the plot as ASCII art
+    \\-h, --help           show this message
+    \\<relation>...
+    \\
+);
+
+const Size = struct { width: u32, height: u32 };
+
+fn parseSize(in: []const u8) error{InvalidSize}!Size {
+    const pair = std.mem.cutScalar(u8, in, 'x') orelse return error.InvalidSize;
+    return .{
+        .width = std.fmt.parseInt(u32, pair[0], 10) catch return error.InvalidSize,
+        .height = std.fmt.parseInt(u32, pair[1], 10) catch return error.InvalidSize,
+    };
+}
+
+fn parseRange(in: []const u8) error{InvalidRange}![2]f64 {
+    const pair = std.mem.cutScalar(u8, in, ':') orelse return error.InvalidRange;
+    return .{
+        std.fmt.parseFloat(f64, pair[0]) catch return error.InvalidRange,
+        std.fmt.parseFloat(f64, pair[1]) catch return error.InvalidRange,
+    };
+}
+
+const value_parsers = .{
+    .path = clap.parsers.string,
+    .WxH = parseSize,
+    .@"a:b" = parseRange,
+    .n = clap.parsers.int(u32, 10),
+    .relation = clap.parsers.string,
+};
+
+const preamble =
     \\usage: implicit-plot [options] ["<relation>"]
     \\
     \\Draws the set of points satisfying a relation, using interval arithmetic.
@@ -19,18 +63,14 @@ const usage =
     \\
 ++ "  " ++ irp.parse.function_list ++ "\n" ++
     \\
-    \\Multiplication is never implicit: write 2*x, not 2x.
+    \\Multiplication is never implicit: write 2*x, not 2x. A relation starting
+    \\with a minus goes after "--".
     \\
     \\options:
-    \\  -o, --out <path>     PNG to write, or "-" for none        (default plot.png)
-    \\  -s, --size <WxH>     image size in pixels                 (default 1024x1024)
-    \\  -x, --xrange <a:b>   horizontal range                     (default -10:10)
-    \\  -y, --yrange <a:b>   vertical range                       (default -10:10)
-    \\  -d, --depth <n>      sub-pixel refinement depth           (default 8)
-    \\  -j, --tasks <n>      parallel row strips                  (default 8 per CPU)
-    \\  -a, --ascii          also print the plot as ASCII art
-    \\  -h, --help           show this message
-    \\  --                   everything after this is the relation
+    \\
+;
+
+const examples =
     \\
     \\examples:
     \\  implicit-plot "sin(x^2 + y^2) = cos(x*y)"
@@ -58,10 +98,25 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_file.interface;
     defer stdout.flush() catch {};
 
-    const argv = try init.minimal.args.toSlice(init.arena.allocator());
-    const cli = try parseArgs(argv);
+    var diag: clap.Diagnostic = .{};
+    var res = clap.parse(clap.Help, &params, value_parsers, init.minimal.args, .{
+        .diagnostic = &diag,
+        .allocator = gpa,
+    }) catch |err| {
+        diag.reportToFile(io, .stderr(), err) catch {};
+        std.process.exit(1);
+    };
+    defer res.deinit();
+
+    const cli = cliFrom(res.args, res.positionals[0]);
     if (cli.help) {
-        try stdout.writeAll(usage);
+        try stdout.writeAll(preamble);
+        try clap.help(stdout, clap.Help, &params, .{
+            .description_on_new_line = false,
+            .description_indent = 3,
+            .spacing_between_parameters = 0,
+        });
+        try stdout.writeAll(examples);
         return;
     }
 
@@ -121,106 +176,54 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
-fn parseArgs(argv: []const [:0]const u8) !Cli {
+/// clap's results, checked and folded into one struct with the defaults
+/// applied. The checks fatal out rather than return an error: they are user
+/// mistakes, and the message is the whole point.
+fn cliFrom(args: anytype, relations: []const []const u8) Cli {
     var cli: Cli = .{};
-    var saw_source = false;
-    var only_operands = false;
+    cli.help = args.help != 0;
+    cli.ascii = args.ascii != 0;
 
-    var i: usize = 1;
-    while (i < argv.len) : (i += 1) {
-        const arg = argv[i];
-        if (!only_operands and std.mem.eql(u8, arg, "--")) {
-            only_operands = true;
-            continue;
-        }
-        if (only_operands) {
-            if (saw_source) std.process.fatal("only one relation may be given", .{});
-            cli.source = arg;
-            saw_source = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            cli.help = true;
-            return cli;
-        }
-        if (std.mem.eql(u8, arg, "-a") or std.mem.eql(u8, arg, "--ascii")) {
-            cli.ascii = true;
-            continue;
-        }
-        if (looksLikeOption(arg)) {
-            // Identify the option *before* consuming a value, so that a typo
-            // is reported as a typo rather than as a missing argument.
-            const option = options.get(arg) orelse std.process.fatal("unknown option {s}\n\n{s}", .{ arg, usage });
-            i += 1;
-            if (i == argv.len) std.process.fatal("{s} needs a value", .{arg});
-            const value = argv[i];
-            switch (option) {
-                .out => cli.out = if (std.mem.eql(u8, value, "-")) null else value,
-                .size => {
-                    const size = std.mem.cutScalar(u8, value, 'x') orelse std.process.fatal("--size wants WxH, got {s}", .{value});
-                    cli.view.width = parseUnsigned(size[0], "--size");
-                    cli.view.height = parseUnsigned(size[1], "--size");
-                    if (cli.view.width == 0 or cli.view.height == 0) std.process.fatal("--size must be positive", .{});
-                },
-                .xrange => {
-                    const range = std.mem.cutScalar(u8, value, ':') orelse std.process.fatal("--xrange wants a:b, got {s}", .{value});
-                    cli.view.x_min = parseFloat(range[0], "--xrange");
-                    cli.view.x_max = parseFloat(range[1], "--xrange");
-                },
-                .yrange => {
-                    const range = std.mem.cutScalar(u8, value, ':') orelse std.process.fatal("--yrange wants a:b, got {s}", .{value});
-                    cli.view.y_min = parseFloat(range[0], "--yrange");
-                    cli.view.y_max = parseFloat(range[1], "--yrange");
-                },
-                .depth => cli.depth = @intCast(@min(parseUnsigned(value, "--depth"), 24)),
-                .tasks => cli.tasks = parseUnsigned(value, "--tasks"),
-            }
-            continue;
-        }
-
-        if (saw_source) std.process.fatal("only one relation may be given", .{});
-        cli.source = arg;
-        saw_source = true;
+    if (args.out) |path| cli.out = if (std.mem.eql(u8, path, "-")) null else path;
+    if (args.size) |size| {
+        if (size.width == 0 or size.height == 0) std.process.fatal("--size must be positive", .{});
+        cli.view.width = size.width;
+        cli.view.height = size.height;
     }
+    if (args.xrange) |range| {
+        cli.view.x_min = range[0];
+        cli.view.x_max = range[1];
+    }
+    if (args.yrange) |range| {
+        cli.view.y_min = range[0];
+        cli.view.y_max = range[1];
+    }
+    if (args.depth) |depth| cli.depth = @intCast(@min(depth, 24));
+    if (args.tasks) |tasks| cli.tasks = tasks;
+
+    // clap stores surplus positionals over the one declared into the same
+    // slot, so the count is the only witness that two relations were given.
+    if (relations.len > 1) std.process.fatal("only one relation may be given", .{});
+    if (relations.len == 1) cli.source = relations[0];
 
     if (cli.view.x_min >= cli.view.x_max) std.process.fatal("--xrange must be increasing", .{});
     if (cli.view.y_min >= cli.view.y_max) std.process.fatal("--yrange must be increasing", .{});
     return cli;
 }
 
-const Option = enum { out, size, xrange, yrange, depth, tasks };
-
-const options = std.StaticStringMap(Option).initComptime(.{
-    .{ "-o", .out },     .{ "--out", .out },
-    .{ "-s", .size },    .{ "--size", .size },
-    .{ "-x", .xrange },  .{ "--xrange", .xrange },
-    .{ "-y", .yrange },  .{ "--yrange", .yrange },
-    .{ "-d", .depth },   .{ "--depth", .depth },
-    .{ "-j", .tasks },   .{ "--tasks", .tasks },
-});
-
-/// A leading `-` starts an option unless the argument is a negative number, so
-/// that `-x -6:6` works. A relation that starts with a minus goes after `--`,
-/// which is the convention every POSIX tool already taught the user.
-fn looksLikeOption(arg: []const u8) bool {
-    return arg.len >= 2 and arg[0] == '-' and !std.ascii.isDigit(arg[1]) and arg[1] != '.';
-}
-
-fn parseUnsigned(text: []const u8, what: []const u8) u32 {
-    return std.fmt.parseInt(u32, text, 10) catch
-        std.process.fatal("{s} wants a whole number, got {s}", .{ what, text });
-}
-
-fn parseFloat(text: []const u8, what: []const u8) f64 {
-    return std.fmt.parseFloat(f64, text) catch
-        std.process.fatal("{s} wants a number, got {s}", .{ what, text });
-}
-
 const testing = std.testing;
 
+/// The tests drive the same params, parsers and folding `main` uses, through
+/// clap's slice iterator (which, unlike `clap.parse`, does not skip argv[0]).
+fn parseSlice(args: []const []const u8) !Cli {
+    var iter = clap.args.SliceIterator{ .args = args };
+    var res = try clap.parseEx(clap.Help, &params, value_parsers, &iter, .{ .allocator = testing.allocator });
+    defer res.deinit();
+    return cliFrom(res.args, res.positionals[0]);
+}
+
 test "argument parsing" {
-    const argv = [_][:0]const u8{ "prog", "-s", "320x200", "-x", "-6:6", "--depth", "4", "-a", "y = x^2" };
-    const cli = try parseArgs(&argv);
+    const cli = try parseSlice(&.{ "-s", "320x200", "-x", "-6:6", "--depth", "4", "-a", "y = x^2" });
     try testing.expectEqual(@as(u32, 320), cli.view.width);
     try testing.expectEqual(@as(u32, 200), cli.view.height);
     try testing.expectEqual(@as(f64, -6), cli.view.x_min);
@@ -232,16 +235,19 @@ test "argument parsing" {
 }
 
 test "a relation starting with a minus goes after --" {
-    const explicit = [_][:0]const u8{ "prog", "-x", "-1:1", "--", "-x" };
-    const cli = try parseArgs(&explicit);
+    const cli = try parseSlice(&.{ "-x", "-1:1", "--", "-x" });
     try testing.expectEqualStrings("-x", cli.source);
     try testing.expectEqual(@as(f64, -1), cli.view.x_min);
 }
 
 test "defaults and -o -" {
-    const argv = [_][:0]const u8{ "prog", "-o", "-" };
-    const cli = try parseArgs(&argv);
+    const cli = try parseSlice(&.{ "-o", "-" });
     try testing.expectEqual(@as(?[]const u8, null), cli.out);
     try testing.expectEqualStrings(default_source, cli.source);
     try testing.expectEqual(@as(u32, 1024), cli.view.width);
+}
+
+test "malformed values are parse errors, not crashes" {
+    try testing.expectError(error.InvalidSize, parseSlice(&.{ "-s", "320" }));
+    try testing.expectError(error.InvalidRange, parseSlice(&.{ "-x", "6" }));
 }

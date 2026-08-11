@@ -13,13 +13,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const clap = b.dependency("clap", .{ .target = target, .optimize = optimize });
     const exe = b.addExecutable(.{
         .name = "implicit-plot",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "implicit_plot", .module = mod }},
+            .imports = &.{
+                .{ .name = "implicit_plot", .module = mod },
+                .{ .name = "clap", .module = clap.module("clap") },
+            },
         }),
     });
     b.installArtifact(exe);
