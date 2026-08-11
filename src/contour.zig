@@ -953,7 +953,7 @@ fn weld(gpa: std.mem.Allocator, found: []Found, segments: []const [2]EdgeKey, un
     // in the middle and split in two; whatever remains is loops. A loop walk
     // returns to where it began, so first == last holds by construction and the
     // caller can stroke either kind without special-casing.
-    for ([2]u8{ 1, 2 }) |pass| {
+    for (1..3) |pass| {
         for (0..vertex_count) |v0| {
             if (pass == 1 and degree[v0] % 2 == 0) continue;
             while (nextUnused(offsets, adjacent, used, @intCast(v0))) |_| {
@@ -962,13 +962,11 @@ fn weld(gpa: std.mem.Allocator, found: []Found, segments: []const [2]EdgeKey, un
         }
     }
 
-    var curves: Curves = .{
+    return .{
         .points = try out_points.toOwnedSlice(gpa),
         .starts = try starts.toOwnedSlice(gpa),
         .uncertain = uncertain,
     };
-    _ = &curves;
-    return curves;
 }
 
 fn nextUnused(offsets: []const u32, adjacent: []const u32, used: []const bool, v: u32) ?u32 {
