@@ -147,7 +147,7 @@
 }
 
 /// Trace the curve of a relation as polylines, by subdivision with a
-/// guaranteed topology (Plantinga & Vegter, SGP 2004; Lin & Yap, DCG 2011).
+/// guaranteed topology @lin-yap2011.
 ///
 /// Returns a dictionary `(chains, uncertain)`. Each chain is an array of
 /// $(x, y)$ pairs in the relation's own coordinates; closed curves repeat
