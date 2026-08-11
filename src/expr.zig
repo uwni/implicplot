@@ -207,9 +207,6 @@ pub const Builder = struct {
     pub fn div(self: *Builder, a: Index, b: Index) !Index {
         return self.binary(.div, a, b);
     }
-    pub fn call(self: *Builder, tag: Tag, a: Index) !Index {
-        return self.unary(tag, a);
-    }
 };
 
 const testing = std.testing;
@@ -220,7 +217,7 @@ test "operands always precede their parent" {
     const xi = try b.x();
     const yi = try b.y();
     const s = try b.add(try b.powi(xi, 2), try b.powi(yi, 2));
-    const root = try b.call(.sin, s);
+    const root = try b.unary(.sin, s);
 
     var program = try b.build();
     defer program.deinit(testing.allocator);
@@ -258,7 +255,7 @@ test "constants are not folded, so definedness survives to the interval domain" 
 
     var b = Builder.init(testing.allocator);
     defer b.deinit();
-    const root = try b.call(.sqrt, try b.constant(-1));
+    const root = try b.unary(.sqrt, try b.constant(-1));
     try testing.expectEqual(Tag.sqrt, b.nodes.items[root].tag);
 
     var program = try b.build();

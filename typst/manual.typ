@@ -22,7 +22,6 @@
   fill-runs: fill-runs,
   chains-label: chains-label,
   accent: accent,
-  tint: tint,
   cetz: cetz,
   cplot: cplot,
   lq: lq,

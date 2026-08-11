@@ -45,7 +45,8 @@ pub fn build(b: *std.Build) void {
 /// It is a second target rather than a second package: a module carries its
 /// target, so the library source is instantiated once more here, but nothing
 /// else is duplicated - no second `build.zig.zon`, no path dependency, and the
-/// wire format is tested by the host test suite above.
+/// wire format lives in `src/wire.zig`, where the host test suite above pins
+/// it with golden bytes.
 fn addTypstPlugin(b: *std.Build) void {
     // Deliberately WITHOUT simd128, although Typst 0.14+ supports it: Typst
     // executes plugins in an interpreter (wasmi), where every v128 instruction

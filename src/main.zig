@@ -15,9 +15,11 @@ const usage =
     \\
     \\Draws the set of points satisfying a relation, using interval arithmetic.
     \\The relation may use x, y, + - * / ^, parentheses, the constants pi, tau
-    \\and e, the functions abs neg sin cos tan exp sqrt log/ln asin acos atan
-    \\floor ceil, and min(a,b) max(a,b) mod(a,b). Multiplication is never
-    \\implicit: write 2*x, not 2x.
+    \\and e, and these functions:
+    \\
+++ "  " ++ irp.parse.function_list ++ "\n" ++
+    \\
+    \\Multiplication is never implicit: write 2*x, not 2x.
     \\
     \\options:
     \\  -o, --out <path>     PNG to write, or "-" for none        (default plot.png)
@@ -107,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
         defer file.close(io);
         var buffer: [8192]u8 = undefined;
         var file_writer = file.writer(io, &buffer);
-        try irp.png.write(gpa, &file_writer.interface, image, .{});
+        try irp.png.write(gpa, &file_writer.interface, image);
         try file_writer.interface.flush();
         try stdout.print("  wrote {s}\n", .{path});
     }
@@ -155,18 +157,18 @@ fn parseArgs(argv: []const [:0]const u8) !Cli {
             switch (option) {
                 .out => cli.out = if (std.mem.eql(u8, value, "-")) null else value,
                 .size => {
-                    const size = splitPair(value, 'x') orelse std.process.fatal("--size wants WxH, got {s}", .{value});
+                    const size = std.mem.cutScalar(u8, value, 'x') orelse std.process.fatal("--size wants WxH, got {s}", .{value});
                     cli.view.width = parseUnsigned(size[0], "--size");
                     cli.view.height = parseUnsigned(size[1], "--size");
                     if (cli.view.width == 0 or cli.view.height == 0) std.process.fatal("--size must be positive", .{});
                 },
                 .xrange => {
-                    const range = splitPair(value, ':') orelse std.process.fatal("--xrange wants a:b, got {s}", .{value});
+                    const range = std.mem.cutScalar(u8, value, ':') orelse std.process.fatal("--xrange wants a:b, got {s}", .{value});
                     cli.view.x_min = parseFloat(range[0], "--xrange");
                     cli.view.x_max = parseFloat(range[1], "--xrange");
                 },
                 .yrange => {
-                    const range = splitPair(value, ':') orelse std.process.fatal("--yrange wants a:b, got {s}", .{value});
+                    const range = std.mem.cutScalar(u8, value, ':') orelse std.process.fatal("--yrange wants a:b, got {s}", .{value});
                     cli.view.y_min = parseFloat(range[0], "--yrange");
                     cli.view.y_max = parseFloat(range[1], "--yrange");
                 },
@@ -202,11 +204,6 @@ const options = std.StaticStringMap(Option).initComptime(.{
 /// which is the convention every POSIX tool already taught the user.
 fn looksLikeOption(arg: []const u8) bool {
     return arg.len >= 2 and arg[0] == '-' and !std.ascii.isDigit(arg[1]) and arg[1] != '.';
-}
-
-fn splitPair(value: []const u8, separator: u8) ?[2][]const u8 {
-    const at = std.mem.indexOfScalar(u8, value, separator) orelse return null;
-    return .{ value[0..at], value[at + 1 ..] };
 }
 
 fn parseUnsigned(text: []const u8, what: []const u8) u32 {

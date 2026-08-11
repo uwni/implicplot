@@ -1,7 +1,8 @@
 # Implicplot
 
 Draw any implicit relation `f(x, y) op g(x, y)` using interval arithmetic.
-A Zig 0.16 rewrite of the JavaScript implementation in [`../src`](../src).
+A Zig 0.16 rewrite of the JavaScript implementation in
+[uwni/implicit-relation-plot](https://github.com/uwni/implicit-relation-plot).
 
 ```console
 $ zig build -Doptimize=ReleaseFast
@@ -24,17 +25,19 @@ relation with intervals instead of numbers and the result *encloses* every value
 one pixel, then a little further.
 
 ```text
-  text  --parse-->  Program (flat DAG)  --eval-->  Interval / Real
+  text  --parse-->  Program (flat DAG)  --eval-->  Interval / Real / Dual
                              |                          |
                              +--------- Relation --------+
                                             |
-                                        plot.render  -->  Raster  -->  PNG / ASCII
+                                plot.render    -->  Raster  -->  PNG / ASCII
+                                contour.trace  -->  Curves  -->  polylines
 ```
 
 | file | what it holds |
 | --- | --- |
 | `interval.zig` | interval arithmetic over `lanes` boxes at a time, plus three-valued logic |
 | `real.zig` | the same operations on plain floats, `lanes` points at a time |
+| `dual.zig` | forward-mode differentiation, as a third arithmetic domain |
 | `expr.zig` | the flat topologically-ordered node array, and the hash-consing builder |
 | `parse.zig` | `"sin(x^2+y^2) = cos(x*y)"` to a `Relation` |
 | `eval.zig` | one evaluator, generic over the arithmetic domain |
@@ -42,6 +45,7 @@ one pixel, then a little further.
 | `raster.zig` | 1 bit per pixel, byte-aligned rows |
 | `png.zig` | indexed 1-bit PNG encoder |
 | `plot.zig` | the quadtree, in pixel-index space, run in parallel |
+| `contour.zig` | the curve as polylines, by subdivision with a guaranteed topology |
 
 Three decisions carry most of the design:
 
@@ -97,15 +101,19 @@ Two questions, two answers, and neither is an image:
   whose topology is not guaranteed. Use it when you need a stroke.
 
 `contour` is the algorithm of
-[Plantinga & Vegter, *Isotopic Approximation of Implicit Curves and Surfaces*, SGP 2004](https://pure.rug.nl/ws/files/2952308/2004ProcGeomProcPlantinga.pdf),
+[Plantinga & Vegter, *Isotopic Approximation of Implicit Curves and Surfaces*, SGP 2004](https://pure.rug.nl/ws/files/2952308/2004ProcGeomProcPlantinga.pdf)
+with the stopping rule of
+[Lin & Yap, *Adaptive Isotopic Approximation of Nonsingular Curves*, DCG 45, 2011](https://doi.org/10.1007/s00454-011-9345-9),
 not marching squares on a grid. A grid has no way to know it is too coarse:
 where the curve turns faster than the spacing it connects samples that are not
-consecutive along the curve, and no post-processing detects it. The paper's
-stopping rule does know. A cell is finished when the interval enclosure of `F`
-over it excludes zero, or when `<grad F, grad F> > 0` over it - the gradient
-turns by less than a right angle, so `F` is monotone in x or in y, so the curve
-is a single arc there with no loop and no second branch. Under that condition
-the output is proved *isotopic* to the true curve.
+consecutive along the curve, and no post-processing detects it. The stopping
+rule does know. A cell is finished when the interval enclosure of `F` over it
+excludes zero, or when `0 not in Fx(C)` or `0 not in Fy(C)` - Lin & Yap's "Cxy" -
+so `F` is strictly monotone in x or in y, so the curve is a single arc there
+with no loop and no second branch. Under that condition the output is proved
+*isotopic* to the true curve. (Plantinga & Vegter's own clause,
+`<grad F, grad F> > 0`, implies Cxy and so splits cells Cxy would have
+accepted; measured here, the weaker rule is 1.67x faster for the same curve.)
 
 Both clauses are things this project already had: interval arithmetic for the
 first, and `dual.zig` - forward-mode differentiation as another arithmetic

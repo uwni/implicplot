@@ -78,8 +78,8 @@ test "the same program evaluates in both domains" {
     const xi = try b.x();
     const yi = try b.y();
     const root = try b.sub(
-        try b.call(.sin, try b.add(try b.powi(xi, 2), try b.powi(yi, 2))),
-        try b.call(.cos, try b.mul(xi, yi)),
+        try b.unary(.sin, try b.add(try b.powi(xi, 2), try b.powi(yi, 2))),
+        try b.unary(.cos, try b.mul(xi, yi)),
     );
     var program = try b.build();
     defer program.deinit(testing.allocator);

@@ -3,11 +3,12 @@
 //! The pipeline is:
 //!
 //! ```text
-//!   text  --parse-->  Program (flat DAG)  --eval-->  Interval / Real
+//!   text  --parse-->  Program (flat DAG)  --eval-->  Interval / Real / Dual
 //!                              |                          |
 //!                              +--------- Relation --------+
 //!                                             |
-//!                                          plot.render  -->  Raster  --> PNG / ASCII
+//!                                 plot.render    -->  Raster  -->  PNG / ASCII
+//!                                 contour.trace  -->  Curves  -->  polylines
 //! ```
 //!
 //! `Program` is a flat array of nodes in topological order; `eval.Evaluator` is
@@ -32,14 +33,8 @@ pub const png = @import("png.zig");
 pub const plot = @import("plot.zig");
 pub const dual = @import("dual.zig");
 pub const contour = @import("contour.zig");
+pub const wire = @import("wire.zig");
 
-pub const Interval = interval.Interval;
-pub const Op = interval.Op;
-pub const Tri = interval.Tri;
-pub const Builder = expr.Builder;
-pub const Program = expr.Program;
-pub const Relation = relation.Relation;
-pub const Raster = raster.Raster;
 pub const View = plot.View;
 pub const render = plot.render;
 

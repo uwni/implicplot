@@ -23,8 +23,8 @@ const interval = @import("interval.zig");
 const real = @import("real.zig");
 
 pub const Op = interval.Op;
-pub const Tri = interval.Tri;
-pub const Decoration = interval.Decoration;
+const Tri = interval.Tri;
+const Decoration = interval.Decoration;
 
 const Iv4 = interval.Interval(4);
 const R4 = real.Real(4);
@@ -159,13 +159,6 @@ pub const Prober = struct {
         if (@reduce(.Or, v != v)) return false;
         return @reduce(.Or, v > zero) and @reduce(.Or, v < zero);
     }
-
-    /// `cornerValues` and `provenBy` in one step. The plotter's refinement
-    /// calls the halves separately, because it inherits most corner values
-    /// from the box it split and only samples the points it lacks.
-    pub fn hasSolution(self: *Prober, rect: Rect, r: Reading) bool {
-        return self.provenBy(r, self.cornerValues(rect));
-    }
 };
 
 const testing = std.testing;
@@ -205,8 +198,8 @@ test "lanes of a probe are independent" {
             const xi = try b.x();
             const yi = try b.y();
             return b.sub(
-                try b.call(.sin, try b.add(try b.powi(xi, 2), try b.powi(yi, 2))),
-                try b.call(.cos, try b.mul(xi, yi)),
+                try b.unary(.sin, try b.add(try b.powi(xi, 2), try b.powi(yi, 2))),
+                try b.unary(.cos, try b.mul(xi, yi)),
             );
         }
     }.f);
@@ -232,7 +225,7 @@ test "a pole is not mistaken for a root" {
     // sign change must NOT be accepted as a solution.
     var rel = try buildRelation(testing.allocator, .eq, struct {
         fn f(b: *expr.Builder) !expr.Index {
-            return b.sub(try b.call(.tan, try b.x()), try b.y());
+            return b.sub(try b.unary(.tan, try b.x()), try b.y());
         }
     }.f);
     defer rel.deinit(testing.allocator);
@@ -244,7 +237,7 @@ test "a pole is not mistaken for a root" {
     const across: Rect = .{ .x0 = half_pi - 0.01, .x1 = half_pi + 0.01, .y0 = -1, .y1 = 1 };
     const r = one(&p, across);
     try testing.expect(!r.dec.isContinuous());
-    try testing.expect(!p.hasSolution(across, r));
+    try testing.expect(!p.provenBy(r, p.cornerValues(across)));
 
     // Away from the pole the same relation is happily continuous.
     const clear: Rect = .{ .x0 = 0.1, .x1 = 0.2, .y0 = -1, .y1 = 1 };
@@ -255,7 +248,7 @@ test "undefined regions are decided false rather than explored" {
     // sqrt(x) - y = 0 with x strictly negative.
     var rel = try buildRelation(testing.allocator, .eq, struct {
         fn f(b: *expr.Builder) !expr.Index {
-            return b.sub(try b.call(.sqrt, try b.x()), try b.y());
+            return b.sub(try b.unary(.sqrt, try b.x()), try b.y());
         }
     }.f);
     defer rel.deinit(testing.allocator);
@@ -268,7 +261,7 @@ test "undefined regions are decided false rather than explored" {
     try testing.expectEqual(Tri.false, r.tri);
     try testing.expectEqual(Decoration.ill, r.dec);
     // And a NaN corner sample is never read as "f is exactly zero here".
-    try testing.expect(!p.hasSolution(outside, r));
+    try testing.expect(!p.provenBy(r, p.cornerValues(outside)));
 }
 
 test "quartering a rect tiles it" {

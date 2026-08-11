@@ -58,62 +58,10 @@ const Failure = struct {
     }
 };
 
-/// The `options` argument: little-endian, 42 bytes.
-///
-/// A packed struct would describe this more directly, but its in-memory layout
-/// is not the wire layout on every target, and getting that wrong is silent.
-const Options = struct {
-    const size = 4 + 4 + 8 * 4 + 1 + 1;
-
-    view: irp.View,
-    /// `plot`: how far a single undecided pixel may be subdivided. `contour`:
-    /// how far below `n`'s resolution an unresolved cell may be split.
-    depth: u8,
-    /// `contour` only: what to draw in cells whose topology could not be
-    /// certified. 0 keeps the arcs apart; 1 contracts each uncertain cluster
-    /// to a junction, joining everything that meets it - for relations the
-    /// caller knows genuinely self-intersect.
-    join_uncertain: bool,
-
-    fn parse(bytes: []const u8) !Options {
-        if (bytes.len != size) return error.BadOptionsLength;
-        return .{
-            .view = .{
-                .width = std.mem.readInt(u32, bytes[0..4], .little),
-                .height = std.mem.readInt(u32, bytes[4..8], .little),
-                .x_min = readFloat(bytes[8..16]),
-                .x_max = readFloat(bytes[16..24]),
-                .y_min = readFloat(bytes[24..32]),
-                .y_max = readFloat(bytes[32..40]),
-            },
-            .depth = bytes[40],
-            .join_uncertain = switch (bytes[41]) {
-                0 => false,
-                1 => true,
-                else => return error.UnknownUncertainPolicy,
-            },
-        };
-    }
-
-    fn readFloat(bytes: *const [8]u8) f64 {
-        return @bitCast(std.mem.readInt(u64, bytes, .little));
-    }
-
-    fn validate(self: Options) !void {
-        if (self.view.width == 0 or self.view.height == 0) return error.EmptyImage;
-        if (!(self.view.x_min < self.view.x_max)) return error.EmptyXRange;
-        if (!(self.view.y_min < self.view.y_max)) return error.EmptyYRange;
-    }
-
-    fn pixels(self: Options) u64 {
-        return @as(u64, self.view.width) * self.view.height;
-    }
-
-    /// A grid of `width` by `height` cells has one more point along each axis.
-    fn samples(self: Options) u64 {
-        return (@as(u64, self.view.width) + 1) * (@as(u64, self.view.height) + 1);
-    }
-};
+/// The options header and the response layouts live in `wire.zig`, inside the
+/// library, where the host test suite pins them with golden bytes - this file
+/// cannot host tests, since its exports reference the `typst_env` externs.
+const Options = irp.wire.Options;
 
 /// The result is one byte per pixel and a document is not a good place to
 /// allocate tens of megabytes.
@@ -134,18 +82,9 @@ export fn plot(relation_len: usize, options_len: usize) Retval {
     return .success;
 }
 
-/// The curve as polylines, for stroking rather than filling.
-///
-/// The response is little-endian:
-///
-/// ```text
-///   u32           number of chains
-///   u32           cells whose topology is not guaranteed (a singularity)
-///   u32 * chains  points in each chain
-///   f64 * 2 * n   x, y of every point, chains back to back
-/// ```
-///
-/// `width` and `height` are the tracing grid, not pixels.
+/// The curve as polylines, for stroking rather than filling. The response
+/// layout is `wire.encodeCurves`'s; `width` and `height` are the tracing
+/// grid, not pixels.
 export fn contour(relation_len: usize, options_len: usize) Retval {
     const args = gpa.alloc(u8, relation_len + options_len) catch return fail("out of memory");
     defer gpa.free(args);
@@ -201,30 +140,19 @@ fn contourImpl(source: []const u8, options_bytes: []const u8, failure: *Failure)
     // `width` is a resolution request, not a grid: the tree splits at least
     // that far where the curve runs, and stops at once where it does not.
     const across = @max(options.view.width, options.view.height);
-    var curves = try irp.contour.trace(gpa, &relation, options.view, .{
+    var curves = try irp.contour.trace(gpa, &relation, .{
+        .x0 = options.view.x_min,
+        .x1 = options.view.x_max,
+        .y0 = options.view.y_min,
+        .y1 = options.view.y_max,
+    }, .{
         .min_depth = @intCast(@min(16, std.math.log2_int_ceil(u32, @max(2, across)))),
-        .extra_depth = @intCast(@min(options.depth, 10)),
+        .extra_depth = @intCast(@min(options.depth, irp.wire.max_contour_refine)),
         .uncertain = if (options.join_uncertain) .join else .avoid,
     });
     defer curves.deinit(gpa);
 
-    const header = (2 + curves.len()) * @sizeOf(u32);
-    const out = try gpa.alloc(u8, header + curves.points.len * 2 * @sizeOf(f64));
+    const out = try irp.wire.encodeCurves(gpa, curves);
     defer gpa.free(out);
-
-    std.mem.writeInt(u32, out[0..4], @intCast(curves.len()), .little);
-    std.mem.writeInt(u32, out[4..8], curves.uncertain, .little);
-    for (0..curves.len()) |k| {
-        const length: u32 = curves.starts[k + 1] - curves.starts[k];
-        std.mem.writeInt(u32, out[8 + k * 4 ..][0..4], length, .little);
-    }
-
-    var written = header;
-    for (curves.points) |point| {
-        std.mem.writeInt(u64, out[written..][0..8], @bitCast(point.x), .little);
-        std.mem.writeInt(u64, out[written + 8 ..][0..8], @bitCast(point.y), .little);
-        written += 16;
-    }
-
     sendResultToHost(out);
 }

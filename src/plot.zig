@@ -112,7 +112,6 @@ pub const Box = struct {
 /// The five points a quartering adds to a rect's four corners, forming a 3x3
 /// grid: the edge midpoints - bottom, left, right, top - then the centre.
 const grid_points = 5;
-const all_grid_points: u5 = 0b11111;
 
 /// Which grid points each quarter of `Rect.quarters` has as corners, as a bit
 /// set: every quarter touches the centre and its two adjacent edge midpoints.
@@ -159,14 +158,20 @@ const Worker = struct {
     }
 
     fn visit(self: *Worker, box: Box, r: Reading) void {
-        if (r.tri == .false) return;
+        if (!self.settled(box, r)) self.explore(box);
+    }
+
+    /// Paint, refine or drop a box that needs no further probing. False means
+    /// the box stays open: it must be split and its children probed.
+    fn settled(self: *Worker, box: Box, r: Reading) bool {
+        if (r.tri == .false) return true;
 
         if (box.isPixel()) {
             const rect = self.rectOf(box);
             if (r.tri == .true or self.refine(rect, r, self.prober.cornerValues(rect), self.depth)) {
                 self.raster.set(box.x0, box.y0);
             }
-            return;
+            return true;
         }
 
         // A `true` verdict may only be painted wholesale if the relation is
@@ -174,16 +179,70 @@ const Worker = struct {
         // resolved by subdividing.
         if (r.tri == .true and r.dec.isDefined()) {
             self.raster.fill(box.x0, box.y0, box.x1, box.y1);
+            return true;
+        }
+        return false;
+    }
+
+    /// Split an open box and probe its children.
+    ///
+    /// A quad split fills a probe exactly. A binary split would leave half of
+    /// every pass as padding - and once a box splits two ways, so does every
+    /// descendant, so whole chains of passes would run half empty; under
+    /// `defaultTasks`' thin strips those chains carry most of the above-pixel
+    /// work. `explorePair` instead probes the children of two open siblings
+    /// in one full pass. Pairing changes which lanes a box occupies and
+    /// nothing else: lanes are independent, so every box gets the same
+    /// reading and the raster is bitwise identical either way.
+    fn explore(self: *Worker, box: Box) void {
+        var children: [4]Box = undefined;
+        const n = box.split(&children);
+        if (n == 4) {
+            var rects: [4]Rect = undefined;
+            for (&rects, &children) |*rect, child| rect.* = self.rectOf(child);
+            const readings = self.prober.probe(rects);
+            for (children, readings) |child, reading| self.visit(child, reading);
             return;
         }
 
-        var children: [4]Box = undefined;
-        const n = box.split(&children);
-        var rects: [4]Rect = undefined;
-        for (&rects, 0..) |*rect, i| rect.* = self.rectOf(children[@min(i, n - 1)]);
+        const padding = self.rectOf(children[1]);
+        const readings = self.prober.probe(.{ self.rectOf(children[0]), padding, padding, padding });
+        self.descend(children[0..2].*, readings[0..2].*);
+    }
 
+    /// Two open siblings of binary splits: their four children fill one probe.
+    /// Only ever called on boxes that split two ways - a binary split's
+    /// children are binary or pixels, never quads, so the invariant holds all
+    /// the way down.
+    fn explorePair(self: *Worker, a: Box, b: Box) void {
+        var children: [4]Box = undefined;
+        var second: [4]Box = undefined;
+        const an = a.split(&children);
+        const bn = b.split(&second);
+        std.debug.assert(an == 2 and bn == 2);
+        children[2] = second[0];
+        children[3] = second[1];
+
+        var rects: [4]Rect = undefined;
+        for (&rects, &children) |*rect, child| rect.* = self.rectOf(child);
         const readings = self.prober.probe(rects);
-        for (children[0..n], readings[0..n]) |child, reading| self.visit(child, reading);
+        self.descend(children, readings);
+    }
+
+    /// Recurse into whichever probed children stay open, pairing them up so
+    /// that their own splits keep the probes full.
+    fn descend(self: *Worker, children: anytype, readings: anytype) void {
+        var open: [4]Box = undefined;
+        var count: usize = 0;
+        for (children, readings) |child, reading| {
+            if (!self.settled(child, reading)) {
+                open[count] = child;
+                count += 1;
+            }
+        }
+        var i: usize = 0;
+        while (i + 1 < count) : (i += 2) self.explorePair(open[i], open[i + 1]);
+        if (count % 2 == 1) self.explore(open[count - 1]);
     }
 
     /// Below one pixel there is no grid left to index, so refinement falls back
@@ -192,8 +251,13 @@ const Worker = struct {
     /// `corners` holds the values of `f` at the rect's own corners; the caller
     /// always has them. The sixteen corners of the four quarters are the nine
     /// points of a 3x3 grid, of which four are `corners`, so a level samples at
-    /// most the five points it lacks - and only those its unknown quarters
-    /// will actually look at - instead of sixteen.
+    /// most the five points it lacks instead of sixteen.
+    ///
+    /// The sampling is deliberately eager: everything the unknown quarters
+    /// want, before any recursion. When the first recursion settles the rect,
+    /// points only its never-visited siblings wanted were sampled for nothing
+    /// - bounded at one extra pass per rect - but sampling lazily per quarter
+    /// costs more in bookkeeping than that waste does; both were measured.
     fn refine(self: *Worker, rect: Rect, r: Reading, corners: Corners, depth: u8) bool {
         if (self.prober.provenBy(r, corners)) return true;
         if (depth == 0) return false;
@@ -212,58 +276,51 @@ const Worker = struct {
         };
         if (needed == 0) return false;
 
-        const vals = self.sampleGrid(rect, needed);
+        var vals: [grid_points]f64 = undefined;
+        if (@popCount(needed) <= 4) {
+            sampleGrid(&self.prober, rect, needed, &vals);
+        } else {
+            sampleGrid(&self.prober, rect, 0b01111, &vals);
+            sampleGrid(&self.prober, rect, 0b10000, &vals);
+        }
         for (quarters, readings, 0..) |quarter, reading, i| {
             if (reading.tri != .unknown) continue;
             if (self.refine(quarter, reading, quarterCorners(corners, vals, i), depth - 1)) return true;
         }
         return false;
     }
-
-    /// Evaluate the grid points listed in `needed`, into their slots of the
-    /// point table. At most four points fit one vector pass, and `needed`
-    /// rarely wants all five, so the common case is a single pass with the
-    /// unused lanes repeating a point.
-    fn sampleGrid(self: *Worker, rect: Rect, needed: u5) [grid_points]f64 {
-        // The same midpoint expressions as `Rect.quarters`, so a sample lands
-        // exactly on the corner of the quarter it stands for.
-        const xm = 0.5 * (rect.x0 + rect.x1);
-        const ym = 0.5 * (rect.y0 + rect.y1);
-        const grid_x = [grid_points]f64{ xm, rect.x0, rect.x1, xm, xm };
-        const grid_y = [grid_points]f64{ rect.y0, ym, ym, rect.y1, ym };
-
-        var vals: [grid_points]f64 = undefined;
-        if (needed == all_grid_points) {
-            const four = self.prober.evalPoints(
-                .{ grid_x[0], grid_x[1], grid_x[2], grid_x[3] },
-                .{ grid_y[0], grid_y[1], grid_y[2], grid_y[3] },
-            );
-            inline for (0..4) |p| vals[p] = four[p];
-            vals[4] = self.prober.evalPoints(@splat(grid_x[4]), @splat(grid_y[4]))[0];
-            return vals;
-        }
-
-        var lanes: [4]u3 = undefined;
-        var count: usize = 0;
-        for (0..grid_points) |p| {
-            if ((needed >> @intCast(p)) & 1 != 0) {
-                lanes[count] = @intCast(p);
-                count += 1;
-            }
-        }
-        for (lanes[count..]) |*slot| slot.* = lanes[0];
-
-        var xs: [4]f64 = undefined;
-        var ys: [4]f64 = undefined;
-        for (lanes, &xs, &ys) |p, *x, *y| {
-            x.* = grid_x[p];
-            y.* = grid_y[p];
-        }
-        const got: [4]f64 = self.prober.evalPoints(xs, ys);
-        for (lanes[0..count], got[0..count]) |p, value| vals[p] = value;
-        return vals;
-    }
 };
+
+/// Evaluate the grid points listed in `batch` - between one and four of
+/// them - into their slots of `vals`, in one vector pass, the unused lanes
+/// repeating a point.
+fn sampleGrid(prober: *relation.Prober, rect: Rect, batch: u5, vals: *[grid_points]f64) void {
+    // The same midpoint expressions as `Rect.quarters`, so a sample lands
+    // exactly on the corner of the quarter it stands for.
+    const xm = 0.5 * (rect.x0 + rect.x1);
+    const ym = 0.5 * (rect.y0 + rect.y1);
+    const grid_x = [grid_points]f64{ xm, rect.x0, rect.x1, xm, xm };
+    const grid_y = [grid_points]f64{ rect.y0, ym, ym, rect.y1, ym };
+
+    var lanes: [4]u3 = undefined;
+    var count: usize = 0;
+    for (0..grid_points) |p| {
+        if ((batch >> @intCast(p)) & 1 != 0) {
+            lanes[count] = @intCast(p);
+            count += 1;
+        }
+    }
+    for (lanes[count..]) |*slot| slot.* = lanes[0];
+
+    var xs: [4]f64 = undefined;
+    var ys: [4]f64 = undefined;
+    for (lanes, &xs, &ys) |p, *x, *y| {
+        x.* = grid_x[p];
+        y.* = grid_y[p];
+    }
+    const got: [4]f64 = prober.evalPoints(xs, ys);
+    for (lanes[0..count], got[0..count]) |p, value| vals[p] = value;
+}
 
 /// Render `rel` into a fresh raster. Caller owns the result.
 ///
@@ -441,7 +498,7 @@ test "an everywhere-undefined relation renders nothing" {
     var rel = try testRelation(.eq, struct {
         fn f(b: *expr.Builder) !expr.Index {
             const inner = try b.sub(try b.constant(-1), try b.powi(try b.x(), 2));
-            return b.sub(try b.call(.sqrt, inner), try b.y());
+            return b.sub(try b.unary(.sqrt, inner), try b.y());
         }
     }.f);
     defer rel.deinit(testing.allocator);
@@ -453,14 +510,50 @@ test "an everywhere-undefined relation renders nothing" {
     try testing.expectEqual(@as(usize, 0), raster.count());
 }
 
+test "the quarter tables agree with the geometry they encode" {
+    // Four artifacts state one geometry: the order of `Rect.quarters`, the
+    // `Corners` lane order, `quarter_points`, and `quarterCorners`. Nothing
+    // asserts if they drift - `provenBy` is lane-order-blind, so the image
+    // just changes. This pins them together, executably and *exactly*: both
+    // sides use the identical midpoint expressions and per-lane pure
+    // evaluation, so the equality is bitwise, not approximate.
+    var rel = try testRelation(.eq, struct {
+        fn f(b: *expr.Builder) !expr.Index {
+            // Injective on any 3x3 grid, defined everywhere.
+            return b.add(try b.x(), try b.mul(try b.constant(3.7), try b.y()));
+        }
+    }.f);
+    defer rel.deinit(testing.allocator);
+
+    var p = try relation.Prober.init(testing.allocator, &rel);
+    defer p.deinit(testing.allocator);
+
+    const rect: Rect = .{ .x0 = -1.25, .x1 = 2.5, .y0 = 0.5, .y1 = 3.75 };
+    const corners = p.cornerValues(rect);
+    var vals: [grid_points]f64 = undefined;
+    sampleGrid(&p, rect, 0b01111, &vals);
+    sampleGrid(&p, rect, 0b10000, &vals);
+
+    for (rect.quarters(), 0..) |quarter, i| {
+        const want: [4]f64 = p.cornerValues(quarter);
+        const got: [4]f64 = quarterCorners(corners, vals, i);
+        try testing.expectEqual(want, got);
+        // And the mask really lists the grid points the quarter reads.
+        for (0..grid_points) |point| {
+            const read = std.mem.indexOfScalar(f64, &got, vals[point]) != null;
+            try testing.expectEqual(read, (quarter_points[i] >> @intCast(point)) & 1 != 0);
+        }
+    }
+}
+
 test "the number of strips does not change the image" {
     var rel = try testRelation(.eq, struct {
         fn f(b: *expr.Builder) !expr.Index {
             const xi = try b.x();
             const yi = try b.y();
             return b.sub(
-                try b.call(.sin, try b.add(try b.powi(xi, 2), try b.powi(yi, 2))),
-                try b.call(.cos, try b.mul(xi, yi)),
+                try b.unary(.sin, try b.add(try b.powi(xi, 2), try b.powi(yi, 2))),
+                try b.unary(.cos, try b.mul(xi, yi)),
             );
         }
     }.f);

@@ -39,6 +39,9 @@
 // The 42-byte options header. Both plugin calls take the same one, so it is
 // built in one place rather than once per entry point. The final byte is
 // `contour`'s uncertain-cell policy; `plot` ignores it.
+//
+// This mirrors `Options.parse` in src/wire.zig, which owns the layout and
+// pins it with golden-byte tests; any change starts there.
 #let _options(width, height, x, y, depth, join) = {
   assert(width > 0 and height > 0, message: "the grid must be at least 1 by 1")
   assert(x.at(0) < x.at(1), message: "the x range must be increasing")
@@ -199,6 +202,7 @@
   uncertain: "avoid",
 ) = {
   assert(type(n) == int, message: "n must be an integer")
+  // 10 is `max_contour_refine` in src/wire.zig; the plugin clamps to it too.
   assert(type(refine) == int and refine >= 0 and refine <= 10, message: "refine must be 0..10")
   assert(uncertain in ("avoid", "join"), message: "uncertain must be \"avoid\" or \"join\"")
 

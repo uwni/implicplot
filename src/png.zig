@@ -12,10 +12,10 @@ const std = @import("std");
 const flate = std.compress.flate;
 const Raster = @import("raster.zig").Raster;
 
-pub const Palette = struct {
-    background: [3]u8 = .{ 0xff, 0xff, 0xff },
-    foreground: [3]u8 = .{ 0x00, 0x78, 0xd4 },
-};
+/// White background, accent foreground. A constant, not a parameter: the CLI
+/// exposes no colour option and the plugin returns raw pixels, so nothing has
+/// ever asked for a second palette.
+const palette = [6]u8{ 0xff, 0xff, 0xff, 0x00, 0x78, 0xd4 };
 
 const signature = [_]u8{ 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
 
@@ -29,7 +29,7 @@ fn chunk(w: *std.Io.Writer, kind: *const [4]u8, data: []const u8) !void {
     try w.writeInt(u32, crc.final(), .big);
 }
 
-pub fn write(gpa: std.mem.Allocator, w: *std.Io.Writer, raster: Raster, palette: Palette) !void {
+pub fn write(gpa: std.mem.Allocator, w: *std.Io.Writer, raster: Raster) !void {
     try w.writeAll(&signature);
 
     var ihdr: [13]u8 = undefined;
@@ -42,7 +42,7 @@ pub fn write(gpa: std.mem.Allocator, w: *std.Io.Writer, raster: Raster, palette:
     ihdr[12] = 0; // interlace: none
     try chunk(w, "IHDR", &ihdr);
 
-    try chunk(w, "PLTE", &(palette.background ++ palette.foreground));
+    try chunk(w, "PLTE", &palette);
 
     const idat = try deflateScanlines(gpa, raster);
     defer gpa.free(idat);
@@ -113,7 +113,7 @@ test "encodes a structurally valid indexed 1-bit png" {
 
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try write(testing.allocator, &out.writer, raster, .{});
+    try write(testing.allocator, &out.writer, raster);
 
     const bytes = out.writer.buffered();
     const header = try parseAndVerify(bytes);

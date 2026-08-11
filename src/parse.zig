@@ -163,7 +163,7 @@ const Parser = struct {
         self.depth += 1;
         defer self.depth -= 1;
 
-        if (self.eat('-')) return self.b.call(.neg, try self.unary());
+        if (self.eat('-')) return self.b.unary(.neg, try self.unary());
         if (self.eat('+')) return self.unary();
         return self.power();
     }
@@ -259,13 +259,38 @@ const Parser = struct {
     }
 };
 
-/// The spellings that are not simply the tag's own name.
-const aliases = std.StaticStringMap(expr.Tag).initComptime(.{
+/// The spellings that are not simply the tag's own name. One list, shared by
+/// the lookup map and the generated `function_list`.
+const alias_list = [_]struct { []const u8, expr.Tag }{
     .{ "ln", .log },
     .{ "arcsin", .asin },
     .{ "arccos", .acos },
     .{ "arctan", .atan },
-});
+};
+
+const aliases = std.StaticStringMap(expr.Tag).initComptime(alias_list);
+
+/// Every function the parser accepts, for usage text, generated from the enum
+/// and the alias table the same way `expected_comparison` is: help cannot list
+/// a set of functions `functionTag` does not resolve. The hand-written list it
+/// replaces had already drifted - it never mentioned arcsin/arccos/arctan.
+pub const function_list = blk: {
+    var unary_names: []const u8 = "";
+    var binary_names: []const u8 = "";
+    for (std.enums.values(expr.Tag)) |tag| {
+        if (!tag.isCallable()) continue;
+        var name: []const u8 = @tagName(tag);
+        for (alias_list) |kv| {
+            if (kv[1] == tag) name = name ++ "/" ++ kv[0];
+        }
+        switch (tag.arity()) {
+            1 => unary_names = unary_names ++ (if (unary_names.len == 0) "" else " ") ++ name,
+            2 => binary_names = binary_names ++ (if (binary_names.len == 0) "" else " ") ++ name ++ "(a,b)",
+            else => unreachable,
+        }
+    }
+    break :blk unary_names ++ ", and " ++ binary_names;
+};
 
 /// Every callable operator is callable under its own name, so `expr.Tag` is
 /// the single source of truth for what the language has: adding an operator
@@ -406,6 +431,19 @@ test "the arity in the enum is the arity the parser enforces" {
         try testing.expectError(error.ParseFailed, relationFrom(testing.allocator, source, &diag));
         try testing.expectEqualStrings("unknown name", diag.message);
     }
+}
+
+test "the function list is generated from the enum and the aliases" {
+    inline for (comptime std.enums.values(expr.Tag)) |tag| {
+        if (comptime tag.isCallable()) {
+            try testing.expect(std.mem.indexOf(u8, function_list, @tagName(tag)) != null);
+        }
+    }
+    inline for (alias_list) |kv| {
+        try testing.expect(std.mem.indexOf(u8, function_list, kv[0]) != null);
+    }
+    try testing.expect(std.mem.indexOf(u8, function_list, "log/ln") != null);
+    try testing.expect(std.mem.indexOf(u8, function_list, "mod(a,b)") != null);
 }
 
 test "the message listing the comparisons is generated from the enum" {

@@ -49,17 +49,7 @@ pub const Op = enum {
     gt,
     ge,
 
-    pub fn holds(op: Op, v: f64) bool {
-        return switch (op) {
-            .eq => v == 0,
-            .lt => v < 0,
-            .le => v <= 0,
-            .gt => v > 0,
-            .ge => v >= 0,
-        };
-    }
-
-    /// `holds` for a whole batch of samples: true if any lane satisfies it.
+    /// True if any lane of the samples satisfies `v op 0`.
     ///
     /// A NaN needs no guard of its own. Every IEEE comparison against NaN is
     /// false, so a lane whose sample was lost simply fails to satisfy the
@@ -511,7 +501,7 @@ pub fn Interval(comptime lanes: comptime_int) type {
 
         pub fn sqrt(self: Self) Self {
             const zero = vec(0);
-            var out = self.erase(self.hi < zero).demote(self.lo < zero, .trv);
+            var out = self.demote(self.lo < zero, .trv);
             out.lo = @sqrt(@max(out.lo, zero));
             out.hi = @sqrt(@max(out.hi, zero));
             return out.widen().erase(self.hi < zero);
@@ -519,7 +509,7 @@ pub fn Interval(comptime lanes: comptime_int) type {
 
         pub fn log(self: Self) Self {
             const zero = vec(0);
-            var out = self.erase(self.hi <= zero).demote(self.lo <= zero, .trv);
+            var out = self.demote(self.lo <= zero, .trv);
             out.lo = @select(f64, self.lo <= zero, vec(-std.math.inf(f64)), @log(self.lo));
             out.hi = @log(@max(self.hi, vec(tiny)));
             return out.widen().erase(self.hi <= zero);
@@ -594,7 +584,7 @@ pub fn Interval(comptime lanes: comptime_int) type {
         /// exact zero comes back as `[-tiny, +tiny]`. That is not a gap to be
         /// closed - an outward-rounded enclosure genuinely cannot witness
         /// pointwise equality - which is why equalities are painted by
-        /// `Prober.hasSolution` sampling for a sign change instead.
+        /// `Prober.provenBy` reading a sign change off corner samples instead.
         pub fn decide(self: Self, op: Op) Verdict {
             const zero = vec(0);
             var v: Verdict = switch (op) {
@@ -699,7 +689,6 @@ test "every unary operation encloses the values it takes" {
             // Claiming "nowhere defined" while a sample was defined is a lie.
             if (any_defined) try testing.expect((enclosure.decoration(0) != .ill));
         }
-
     }
 }
 

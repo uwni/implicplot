@@ -15,7 +15,6 @@ pub fn Real(comptime lanes: comptime_int) type {
         const Self = @This();
 
         pub const F = @Vector(lanes, f64);
-        pub const width = lanes;
 
         v: F,
 

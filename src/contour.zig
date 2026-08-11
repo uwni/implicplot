@@ -64,7 +64,7 @@ const relation = @import("relation.zig");
 const real = @import("real.zig");
 const dual = @import("dual.zig");
 const eval = @import("eval.zig");
-const View = @import("plot.zig").View;
+const Rect = relation.Rect;
 
 const Relation = relation.Relation;
 const Iv4 = interval.Interval(4);
@@ -112,7 +112,7 @@ pub const Options = struct {
     uncertain: enum { avoid, join } = .avoid,
 
     fn maxDepth(self: Options) u5 {
-        return @min(@as(u5, 20), self.min_depth +| self.extra_depth);
+        return @min(@as(u5, coord_bits - 1), self.min_depth +| self.extra_depth);
     }
 };
 
@@ -196,9 +196,21 @@ const Corners = [4]f64;
 /// no welding tolerance, no epsilon.
 const EdgeKey = u64;
 
+/// How many bits a grid coordinate may need. `Options.maxDepth` clamps to
+/// `coord_bits - 1`, so a corner index reaches `2^(coord_bits-1)` inclusive
+/// and fits; a deeper tree would silently overflow `lo[0]` into `lo[1]`'s
+/// field and collide distinct edges. The depth cap and this layout are the
+/// same fact - stated once, checked below against the junction namespace
+/// `joinClusters` opens at bit 48.
+const coord_bits = 21;
+
+comptime {
+    std.debug.assert(coord_bits + coord_bits + 5 + 1 <= 48);
+}
+
 fn edgeKey(lo: [2]u32, length: u32, vertical: bool) EdgeKey {
-    return @as(u64, lo[0]) | (@as(u64, lo[1]) << 21) |
-        (@as(u64, @ctz(length)) << 42) | (@as(u64, @intFromBool(vertical)) << 47);
+    return @as(u64, lo[0]) | (@as(u64, lo[1]) << coord_bits) |
+        (@as(u64, @ctz(length)) << 2 * coord_bits) | (@as(u64, @intFromBool(vertical)) << 2 * coord_bits + 5);
 }
 
 /// A crossing on the boundary of a leaf, and which of its four sides it is on.
@@ -214,10 +226,17 @@ const Mode = enum { scan, emit };
 const Tree = struct {
     gpa: std.mem.Allocator,
     nodes: std.ArrayList(Node) = .empty,
+    /// The five grid samples a split adds - side midpoints b, t, l, r, then
+    /// the centre - computed once when `splitInto` makes the node internal,
+    /// and read by every walk. Splits append four nodes each, so internal
+    /// node `first_child` owns slot `(first_child - 1) / 4`: dense, no hash.
+    /// Without this, every `emit` walk - and `trace` runs at least two, plus
+    /// one per ambiguity round - re-evaluated all five per internal node.
+    grid: std.ArrayList([5]f64) = .empty,
     uncertain: u32 = 0,
 
     rel: *const Relation,
-    view: View,
+    rect: Rect,
     span: u32,
     boxes: eval.Evaluator(Gradient),
     samples: eval.Evaluator(R8),
@@ -235,14 +254,14 @@ const Tree = struct {
     min_cell_size: u32 = 1,
     spokes: std.ArrayList(struct { cell: u32, edge: EdgeKey, point: Point }) = .empty,
 
-    fn init(gpa: std.mem.Allocator, rel: *const Relation, view: View, depth: u5) !Tree {
+    fn init(gpa: std.mem.Allocator, rel: *const Relation, rect: Rect, depth: u5) !Tree {
         var boxes: eval.Evaluator(Gradient) = try .init(gpa, &rel.program);
         errdefer boxes.deinit(gpa);
         const samples: eval.Evaluator(R8) = try .init(gpa, &rel.program);
         return .{
             .gpa = gpa,
             .rel = rel,
-            .view = view,
+            .rect = rect,
             .span = @as(u32, 1) << depth,
             .boxes = boxes,
             .samples = samples,
@@ -251,6 +270,7 @@ const Tree = struct {
 
     fn deinit(self: *Tree) void {
         self.nodes.deinit(self.gpa);
+        self.grid.deinit(self.gpa);
         self.found.deinit(self.gpa);
         self.uncertain_cells.deinit(self.gpa);
         self.spokes.deinit(self.gpa);
@@ -263,12 +283,12 @@ const Tree = struct {
 
     fn xAt(self: *const Tree, i: u32) f64 {
         const t = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(self.span));
-        return self.view.x_min + (self.view.x_max - self.view.x_min) * t;
+        return self.rect.x0 + (self.rect.x1 - self.rect.x0) * t;
     }
 
     fn yAt(self: *const Tree, j: u32) f64 {
         const t = @as(f64, @floatFromInt(j)) / @as(f64, @floatFromInt(self.span));
-        return self.view.y_min + (self.view.y_max - self.view.y_min) * t;
+        return self.rect.y0 + (self.rect.y1 - self.rect.y0) * t;
     }
 
     /// `F` at eight grid points at once.
@@ -374,6 +394,15 @@ const Tree = struct {
         try self.nodes.appendNTimes(self.gpa, .{}, 4);
         self.nodes.items[index].first_child = first;
 
+        const half = cell.size / 2;
+        const mx = cell.x + half;
+        const my = cell.y + half;
+        const v = self.valuesAt(
+            .{ mx, mx, cell.x, cell.x + cell.size, mx, mx, mx, mx },
+            .{ cell.y, cell.y + cell.size, my, my, my, my, my, my },
+        );
+        try self.grid.append(self.gpa, .{ v[0], v[1], v[2], v[3], v[4] });
+
         const children = [4]Cell{
             cell.child(0, 0), cell.child(1, 0),
             cell.child(0, 1), cell.child(1, 1),
@@ -436,13 +465,11 @@ const Tree = struct {
         // those are the only ones worth looking at again. Rescanning the whole
         // tree after each pass instead spends a full sweep to find the handful
         // that changed, and the sweeps outnumber the splits.
-        var queue: std.ArrayList(Cell) = .empty;
+        var queue: std.Deque(Cell) = .empty;
         defer queue.deinit(self.gpa);
         try self.collectLeaves(0, .{ .x = 0, .y = 0, .size = self.span }, &queue);
 
-        var head: usize = 0;
-        while (head < queue.items.len) : (head += 1) {
-            const cell = queue.items[head];
+        while (queue.popFront()) |cell| {
             if (cell.size <= 1) continue;
             const index = self.nodeAt(cell.x, cell.y, cell.size) orelse continue;
             if (!self.isLeaf(index)) continue; // already split since queued
@@ -454,14 +481,14 @@ const Tree = struct {
             // The cells across this one's sides are now beside something finer.
             for (0..4) |side| {
                 const neighbour = self.acrossSide(cell, @intCast(side)) orelse continue;
-                try queue.append(self.gpa, neighbour);
+                try queue.pushBack(self.gpa, neighbour);
             }
         }
     }
 
-    fn collectLeaves(self: *const Tree, index: u32, cell: Cell, out: *std.ArrayList(Cell)) !void {
+    fn collectLeaves(self: *const Tree, index: u32, cell: Cell, out: *std.Deque(Cell)) !void {
         const first = self.nodes.items[index].first_child;
-        if (first == none) return out.append(self.gpa, cell);
+        if (first == none) return out.pushBack(self.gpa, cell);
         for (0..4) |k| {
             const dx: u32 = @intCast(k & 1);
             const dy: u32 = @intCast(k >> 1);
@@ -501,21 +528,12 @@ const Tree = struct {
         const first = self.nodes.items[index].first_child;
         if (first == none) return self.emitLeaf(mode, cell, corners);
 
-        const half = cell.size / 2;
-        const mx = cell.x + half;
-        const my = cell.y + half;
-        const x1 = cell.x + cell.size;
-        const y1 = cell.y + cell.size;
-
         //   c2 --- t --- c3     the five new points are the four side midpoints
-        //    |     |     |      and the centre; the four corners are known
-        //    l -- ctr -- r
-        //    |     |     |
+        //    |     |     |      and the centre; the four corners are known,
+        //    l -- ctr -- r      and the five were sampled when `splitInto`
+        //    |     |     |      made this node internal
         //   c0 --- b --- c1
-        const v = self.valuesAt(
-            .{ mx, mx, cell.x, x1, mx, mx, mx, mx },
-            .{ cell.y, y1, my, my, my, my, my, my },
-        );
+        const v = self.grid.items[(first - 1) / 4];
         const b = v[0];
         const t = v[1];
         const l = v[2];
@@ -608,23 +626,21 @@ const Tree = struct {
     }
 
     fn uncertainIndexAt(self: *const Tree, x: u32, y: u32) ?u32 {
-        const items = self.uncertain_cells.items;
-        var lo: usize = 0;
-        var hi: usize = items.len;
-        while (lo < hi) {
-            const mid = (lo + hi) / 2;
-            const c = items[mid];
-            if (c.x == x and c.y == y) return @intCast(mid);
-            if (c.y < y or (c.y == y and c.x < x)) lo = mid + 1 else hi = mid;
-        }
-        return null;
+        const at = std.sort.binarySearch(Unresolved, self.uncertain_cells.items, [2]u32{ x, y }, orderByPosition) orelse return null;
+        return @intCast(at);
+    }
+
+    /// The (y, x) order of the uncertain list. One definition serves both the
+    /// sort and the search, so the two cannot come to disagree.
+    fn orderByPosition(target: [2]u32, item: Unresolved) std.math.Order {
+        if (target[1] != item.y) return std.math.order(target[1], item.y);
+        return std.math.order(target[0], item.x);
     }
 
     fn sortUncertain(self: *Tree) void {
         std.mem.sortUnstable(Unresolved, self.uncertain_cells.items, {}, struct {
             fn less(_: void, a: Unresolved, b: Unresolved) bool {
-                if (a.y != b.y) return a.y < b.y;
-                return a.x < b.x;
+                return orderByPosition(.{ a.x, a.y }, b) == .lt;
             }
         }.less);
     }
@@ -802,11 +818,15 @@ const Tree = struct {
     }
 };
 
-/// Trace `rel`'s curve over `view`. Caller owns the result.
-pub fn trace(gpa: std.mem.Allocator, rel: *const Relation, view: View, opts: Options) !Curves {
-    std.debug.assert(view.x_min < view.x_max and view.y_min < view.y_max);
+/// Trace `rel`'s curve over `rect`. Caller owns the result.
+///
+/// A `Rect` and not a `plot.View`: tracing needs the four bounds and nothing
+/// else - resolution lives in `Options.min_depth` - and the two front ends are
+/// siblings over `relation`, not layers of each other.
+pub fn trace(gpa: std.mem.Allocator, rel: *const Relation, rect: Rect, opts: Options) !Curves {
+    std.debug.assert(rect.x0 < rect.x1 and rect.y0 < rect.y1);
 
-    var tree = try Tree.init(gpa, rel, view, opts.maxDepth());
+    var tree = try Tree.init(gpa, rel, rect, opts.maxDepth());
     defer tree.deinit();
 
     const root: Cell = .{ .x = 0, .y = 0, .size = tree.span };
@@ -993,16 +1013,16 @@ fn indexOf(keys: []const EdgeKey, key: EdgeKey) u32 {
 
 const testing = std.testing;
 
-fn traceSource(gpa: std.mem.Allocator, source: []const u8, view: View, opts: Options) !Curves {
+fn traceSource(gpa: std.mem.Allocator, source: []const u8, rect: Rect, opts: Options) !Curves {
     const parse = @import("parse.zig");
     var diagnostic: parse.Diagnostic = .{};
     var rel = try parse.relationFrom(gpa, source, &diagnostic);
     defer rel.deinit(gpa);
-    return trace(gpa, &rel, view, opts);
+    return trace(gpa, &rel, rect, opts);
 }
 
-fn square(r: f64) View {
-    return .{ .width = 1, .height = 1, .x_min = -r, .x_max = r, .y_min = -r, .y_max = r };
+fn square(r: f64) Rect {
+    return .{ .x0 = -r, .x1 = r, .y0 = -r, .y1 = r };
 }
 
 fn isClosed(chain: []const Point) bool {
@@ -1146,7 +1166,7 @@ test "the flat hyperbola stays two components (Lin & Yap figure 5)" {
     var curves = try traceSource(
         testing.allocator,
         "400*y^2 - x^2 = 1",
-        .{ .width = 1, .height = 1, .x_min = -5, .x_max = 11, .y_min = -1, .y_max = 15 },
+        .{ .x0 = -5, .x1 = 11, .y0 = -1, .y1 = 15 },
         .{ .min_depth = 3, .extra_depth = 5 },
     );
     defer curves.deinit(testing.allocator);
@@ -1175,12 +1195,12 @@ test "uncertain policy: join puts a junction at a genuine crossing" {
     const crossing_x = 3.2103554079703436;
     const crossing_y = 1.9571089010441704;
     const source = "sin(x^2 + y^2) = cos(x*y)";
-    const view: View = .{ .width = 1, .height = 1, .x_min = -8, .x_max = 8, .y_min = -8, .y_max = 8 };
+    const rect: Rect = .{ .x0 = -8, .x1 = 8, .y0 = -8, .y1 = 8 };
     const cell = 16.0 / 512.0; // min_depth 7 + extra 2
 
-    var avoided = try traceSource(testing.allocator, source, view, .{ .min_depth = 7 });
+    var avoided = try traceSource(testing.allocator, source, rect, .{ .min_depth = 7 });
     defer avoided.deinit(testing.allocator);
-    var joined = try traceSource(testing.allocator, source, view, .{ .min_depth = 7, .uncertain = .join });
+    var joined = try traceSource(testing.allocator, source, rect, .{ .min_depth = 7, .uncertain = .join });
     defer joined.deinit(testing.allocator);
 
     try testing.expect(avoided.uncertain > 0);
@@ -1228,7 +1248,7 @@ test "an asymptote is never drawn" {
     var curves = try traceSource(
         testing.allocator,
         "y = tan(x)",
-        .{ .width = 1, .height = 1, .x_min = -5, .x_max = 5, .y_min = -4, .y_max = 4 },
+        .{ .x0 = -5, .x1 = 5, .y0 = -4, .y1 = 4 },
         .{ .min_depth = 7 },
     );
     defer curves.deinit(testing.allocator);
