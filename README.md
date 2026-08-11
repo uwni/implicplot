@@ -1,8 +1,6 @@
 # Implicplot
 
 Draw any implicit relation `f(x, y) op g(x, y)` using interval arithmetic.
-A Zig 0.16 rewrite of the JavaScript implementation in
-[uwni/implicit-relation-plot](https://github.com/uwni/implicit-relation-plot).
 
 ![Five arms of a discrete logarithmic spiral, each one implicit relation](typst/thumbnail.png)
 
@@ -177,22 +175,3 @@ error: plugin errored with: unknown name
   sin(x^2 + y^2) = cos(x*z)
                          ^
 ```
-
-## Differences from the JavaScript original
-
-- **Rigorous.** Every rounding operation inflates its result by an ulp, so the
-  computed interval really does contain the exact one. `cos` folds the error of
-  its argument reduction into the interval instead of trusting a reduction that
-  loses all precision for large arguments.
-- **`f < 0` is decided false as soon as `lo >= 0`**, not only when `lo > 0`. The
-  strict test left any box whose bound landed exactly on the boundary undecided
-  forever; `x < 0` over `[-1, 1]` was pathological because of it.
-- **`x^2` is a power, not `x * x`.** `[-1,1] * [-1,1]` is `[-1,1]`, but
-  `[-1,1]^2` is `[0,1]`, so curves converge in fewer subdivisions.
-- **Interval _sets_ are gone.** They existed to notice, via their cardinality,
-  that a division had crossed a pole. That fact is now a `Decoration` on the
-  value - the lattice from IEEE 1788-2015, whose propagation rule is a single
-  `min` - the hull is kept instead of the union, which is still a sound
-  enclosure, and evaluation no longer allocates.
-- **Sub-pixel refinement is depth-limited** rather than cut off at an absolute
-  width of `1e-5` that had nothing to do with the plot's scale.
