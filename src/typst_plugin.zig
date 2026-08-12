@@ -16,7 +16,7 @@
 //! on, and there is no encoder in the document to keep in step.
 
 const std = @import("std");
-const irp = @import("implicit_plot");
+const irp = @import("implicplot");
 
 const gpa = std.heap.wasm_allocator;
 

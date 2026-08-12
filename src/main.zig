@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const clap = @import("clap");
-const irp = @import("implicit_plot");
+const irp = @import("implicplot");
 
 const default_source = "sin(x^2 + y^2) = cos(x*y)";
 
@@ -55,7 +55,7 @@ const value_parsers = .{
 };
 
 const preamble =
-    \\usage: implicit-plot [options] ["<relation>"]
+    \\usage: implicplot [options] ["<relation>"]
     \\
     \\Draws the set of points satisfying a relation, using interval arithmetic.
     \\The relation may use x, y, + - * / % ^, parentheses, the constants pi,
@@ -73,9 +73,9 @@ const preamble =
 const examples =
     \\
     \\examples:
-    \\  implicit-plot "sin(x^2 + y^2) = cos(x*y)"
-    \\  implicit-plot -s 200x80 -a -o - "y = tan(x)"
-    \\  implicit-plot -x -6:6 -y -4:4 "sin(x^2 - y^2) < sin(x + y) + cos(x*y)"
+    \\  implicplot "sin(x^2 + y^2) = cos(x*y)"
+    \\  implicplot -s 200x80 -a -o - "y = tan(x)"
+    \\  implicplot -x -6:6 -y -4:4 "sin(x^2 - y^2) < sin(x + y) + cos(x*y)"
     \\
 ;
 

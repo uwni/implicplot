@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     // The library. `src/root.zig` is the only entry point consumers see; the
     // executable below imports it by name rather than reaching into the source
     // files directly, so the module wiring actually carries weight.
-    const mod = b.addModule("implicit_plot", .{
+    const mod = b.addModule("implicplot", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -15,13 +15,13 @@ pub fn build(b: *std.Build) void {
 
     const clap = b.dependency("clap", .{ .target = target, .optimize = optimize });
     const exe = b.addExecutable(.{
-        .name = "implicit-plot",
+        .name = "implicplot",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "implicit_plot", .module = mod },
+                .{ .name = "implicplot", .module = mod },
                 .{ .name = "clap", .module = clap.module("clap") },
             },
         }),
@@ -80,12 +80,12 @@ fn addTypstPlugin(b: *std.Build) void {
     });
 
     const plugin = b.addExecutable(.{
-        .name = "implicit_plot",
+        .name = "implicplot",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/typst_plugin.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "implicit_plot", .module = lib }},
+            .imports = &.{.{ .name = "implicplot", .module = lib }},
             .strip = true,
             .omit_frame_pointer = true,
             .unwind_tables = .none,

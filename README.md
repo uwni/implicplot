@@ -11,7 +11,7 @@ the corner-sampling proof rather than any sign-change argument.
 
 ```console
 $ zig build -Doptimize=ReleaseFast
-$ ./zig-out/bin/implicit-plot "sin(x^2 + y^2) = cos(x*y)"
+$ ./zig-out/bin/implicplot "sin(x^2 + y^2) = cos(x*y)"
 sin(x^2 + y^2) = cos(x*y)
   1024 x 1024 px over x in [-10, 10], y in [-10, 10]
   wrote plot.png
@@ -79,7 +79,7 @@ scratch buffer per worker.
 ## As a Typst plugin
 
 ```sh
-zig build wasm          # -> typst/implicit_plot.wasm
+zig build wasm          # -> typst/implicplot.wasm
 typst compile typst/manual.typ
 ```
 

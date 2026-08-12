@@ -1,4 +1,4 @@
-// Manual for the implicit-plot Typst plugin.
+// Manual for the implicplot Typst plugin.
 //
 // Imports are namespaced: the module exports `plot`, `contour` and `rows`,
 // names generic enough that a snippet should say which package they came from.

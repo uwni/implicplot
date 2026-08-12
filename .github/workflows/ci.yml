@@ -3,15 +3,37 @@
 # run, and a full compile of the manual - whose snippets are evaluated with
 # asserts, so it is also the only executable check of lib.typ against the
 # plugin it mirrors.
-name: CI
+#
+# On a version tag (or a manual dispatch naming one), the same pipeline also
+# publishes: the CLI cross-compiled for six targets, and the Typst package
+# payload - lib.typ, typst.toml, the wasm - zipped as it would be submitted
+# to Universe. Pushes to main upload the same archives as workflow artifacts
+# under a dev-<sha> version, so any commit's binaries are downloadable.
+name: CI & Release
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag to publish (e.g. v0.1.0). Leave empty for dev build."
+        required: false
+        default: ""
+
+env:
+  # Opt-in to Node.js 24 for all JavaScript actions to avoid deprecation warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write # softprops/action-gh-release creates the release
 
 jobs:
   test:
+    name: Build & Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +49,7 @@ jobs:
         run: zig build -Doptimize=ReleaseFast
 
       - name: Smoke-plot a circle
-        run: ./zig-out/bin/implicit-plot -o smoke.png -s 64x64 -x -1.5:1.5 -y -1.5:1.5 "x^2 + y^2 = 1"
+        run: ./zig-out/bin/implicplot -o smoke.png -s 64x64 -x -1.5:1.5 -y -1.5:1.5 "x^2 + y^2 = 1"
 
       - name: Build Typst plugin
         run: zig build wasm
@@ -38,3 +60,116 @@ jobs:
 
       - name: Compile the manual against the fresh plugin
         run: typst compile typst/manual.typ
+
+  build_and_release:
+    name: Release CLI (${{ matrix.target }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-macos
+            ext: ""
+          - target: x86_64-macos
+            ext: ""
+          - target: x86_64-linux-musl
+            ext: ""
+          - target: aarch64-linux-musl
+            ext: ""
+          - target: x86_64-windows
+            ext: ".exe"
+          - target: aarch64-windows
+            ext: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build (${{ matrix.target }})
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast
+
+      - name: Package artifact
+        id: package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          if [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
+            VERSION="${{ github.event.inputs.release_tag }}"
+          elif [[ ! "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="dev-${GITHUB_SHA:0:7}"
+          fi
+
+          BIN_NAME="implicplot"
+          ARTIFACT_NAME="${BIN_NAME}-${VERSION}-${{ matrix.target }}"
+          mkdir -p staging
+          cp "zig-out/bin/${BIN_NAME}${{ matrix.ext }}" staging/
+          cp LICENSE README.md staging/
+
+          ARCHIVE_FILE="${ARTIFACT_NAME}.zip"
+          (cd staging && zip -r "../${ARCHIVE_FILE}" .)
+          echo "archive_file=${ARCHIVE_FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact to workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: implicplot-${{ matrix.target }}
+          path: ${{ steps.package.outputs.archive_file }}
+
+      - name: Upload to GitHub release
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          files: ${{ steps.package.outputs.archive_file }}
+
+  package_typst:
+    name: Release Typst package
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build Typst plugin
+        run: zig build wasm
+
+      - name: Package artifact
+        id: package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          if [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
+            VERSION="${{ github.event.inputs.release_tag }}"
+          elif [[ ! "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="dev-${GITHUB_SHA:0:7}"
+          fi
+
+          # The package payload, exactly as typst.toml describes it: everything
+          # in typst/ except the excluded manual sources and the generator.
+          mkdir -p staging
+          cp typst/typst.toml typst/lib.typ typst/implicplot.wasm \
+             typst/README.md typst/thumbnail.png LICENSE staging/
+
+          ARCHIVE_FILE="implicplot-typst-${VERSION}.zip"
+          (cd staging && zip -r "../${ARCHIVE_FILE}" .)
+          echo "archive_file=${ARCHIVE_FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact to workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: implicplot-typst
+          path: ${{ steps.package.outputs.archive_file }}
+
+      - name: Upload to GitHub release
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          files: ${{ steps.package.outputs.archive_file }}

@@ -18,7 +18,7 @@
 // Doc comments follow the conventions of the `tidy` package; the API reference
 // in manual.typ is generated from them.
 
-#let _plugin = plugin("./implicit_plot.wasm")
+#let _plugin = plugin("./implicplot.wasm")
 
 // -- the options header -------------------------------------------------------
 

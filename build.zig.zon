@@ -1,9 +1,10 @@
 .{
-    .name = .implicit_plot,
+    .name = .implicplot,
     .version = "0.1.0",
-    // Regenerated when the package was renamed from `zig_impl`; the low bits
-    // are derived from the name, so the old value no longer validates.
-    .fingerprint = 0x9393169570defa, // Changing this has security and trust implications.
+    // Regenerated when the package was renamed (zig_impl -> implicit_plot ->
+    // implicplot); the low bits are derived from the name, so an old value no
+    // longer validates.
+    .fingerprint = 0xed8495a4f18875fa, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .clap = .{

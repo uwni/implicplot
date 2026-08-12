@@ -12,7 +12,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-CLI=zig-out/bin/implicit-plot
+CLI=zig-out/bin/implicplot
 [ -x "$CLI" ] || { echo "build first: zig build -Doptimize=ReleaseFast" >&2; exit 1; }
 
 SIZE=3200x3200
