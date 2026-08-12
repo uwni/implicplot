@@ -29,13 +29,14 @@ relation with intervals instead of numbers and the result _encloses_ every value
 `f` takes on the box. A quadtree subdivides the undecided boxes until they are
 one pixel, then a little further.
 
-```text
-  text  --parse-->  Program (flat DAG)  --eval-->  Interval / Real / Dual
-                             |                          |
-                             +--------- Relation --------+
-                                            |
-                                plot.render    -->  Raster  -->  PNG / ASCII
-                                contour.trace  -->  Curves  -->  polylines
+```mermaid
+flowchart LR
+    text["relation text"] -- parse --> prog["Program<br>(flat DAG)"]
+    prog -- eval --> dom["Interval / Real / Dual"]
+    prog --> rel["Relation"]
+    dom --> rel
+    rel --> render["plot.render"] --> raster["Raster"] --> img["PNG / ASCII"]
+    rel --> trace["contour.trace"] --> curves["Curves"] --> poly["polylines"]
 ```
 
 | file           | what it holds                                                             |
