@@ -483,6 +483,5 @@ during the build.
   )
 }
 
-== References
 
-#bibliography("references.yml", style: "ieee", title: none)
+#bibliography("references.yml", style: "ieee")
