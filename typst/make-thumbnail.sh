@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 CLI=zig-out/bin/implicit-plot
 [ -x "$CLI" ] || { echo "build first: zig build -Doptimize=ReleaseFast" >&2; exit 1; }
 
-SIZE=800x800
+SIZE=3200x3200
 VIEW=6.3
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
