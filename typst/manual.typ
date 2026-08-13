@@ -86,7 +86,9 @@ before it is plotted, and the subtraction of a literal zero is dropped, so
 An expression is built from $x$ and $y$, the constants `pi`, `tau` and `e`,
 decimal literals (`0.5`, `.5` and `1.5e3` all read), the operators
 `+ - * / %` with a leading `-` for negation, parentheses, and `^`. Whitespace
-is insignificant. The functions are
+is insignificant, and the dedicated minus sign `−` (U+2212) --- what math mode
+renders, so it survives copying a formula out of a document --- is accepted
+wherever `-` is, `1e−5`-style axis labels included. The functions are
 
 ```text
 abs  neg  sin  cos  tan  exp  sqrt  log  asin  acos  atan  floor  ceil

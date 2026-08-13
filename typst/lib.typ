@@ -97,9 +97,10 @@
   /// `arctan` as alternative spellings --- and `min(a, b)` and `max(a, b)`.
   /// `%` is floored modulo, taking the sign of its divisor as Python's does.
   /// The comparison is one of `= < <= > >=`, written between the two sides;
-  /// `==` is accepted for `=`. Whitespace is insignificant, but
-  /// multiplication is never implicit: `2x` is an error, and `x^y` is one
-  /// too.
+  /// `==` is accepted for `=`. The dedicated minus sign `−` (U+2212) is
+  /// accepted wherever `-` is, so a formula copied out of rendered math
+  /// parses as written. Whitespace is insignificant, but multiplication is
+  /// never implicit: `2x` is an error, and `x^y` is one too.
   ///
   /// `floor`, `ceil` and `%` are the only discontinuous operations. @contour
   /// refuses to trace across a step and counts those cells in `uncertain`;

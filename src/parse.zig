@@ -45,19 +45,37 @@ fn failAt(diag: ?*Diagnostic, offset: usize, message: []const u8) Error {
     return error.ParseFailed;
 }
 
+/// The dedicated minus sign, U+2212 - what math mode renders, so it is what
+/// pasting a formula out of a document produces, `1e−5` axis labels included.
+const minus_sign = "\u{2212}";
+
 /// Parse `source` into a relation in the normal form `lhs - rhs op 0`.
 pub fn relationFrom(gpa: std.mem.Allocator, source: []const u8, diag: ?*Diagnostic) Error!relation.Relation {
     if (source.len > max_source) return failAt(diag, 0, "relation too long");
 
+    // U+2212 is `-` everywhere in this grammar, so it is replaced once here
+    // rather than recognised at every site a minus may appear. A diagnostic
+    // then indexes the replaced text, and that is the more accurate caret:
+    // the caret line is drawn in columns, and dropping the two bytes a
+    // terminal never shows puts errors after a `−` on the right column.
+    var normalized: []u8 = &.{};
+    defer gpa.free(normalized);
+    var src = source;
+    if (std.mem.indexOf(u8, source, minus_sign) != null) {
+        normalized = try gpa.alloc(u8, source.len);
+        const swaps = std.mem.replace(u8, source, minus_sign, "-", normalized);
+        src = normalized[0 .. source.len - swaps * (minus_sign.len - 1)];
+    }
+
     var builder = expr.Builder.init(gpa);
     defer builder.deinit();
 
-    var p: Parser = .{ .src = source, .b = &builder, .diag = diag };
+    var p: Parser = .{ .src = src, .b = &builder, .diag = diag };
     const lhs = try p.expression();
     const op = try p.comparison();
     const rhs = try p.expression();
     p.skipSpace();
-    if (p.pos != source.len) return p.fail("unexpected trailing input");
+    if (p.pos != src.len) return p.fail("unexpected trailing input");
 
     const root = try builder.sub(lhs, rhs);
     return .{ .program = try builder.build(), .root = root, .op = op };
@@ -109,6 +127,7 @@ const Parser = struct {
         }
         return false;
     }
+
 
     fn comparison(self: *Parser) Error!relation.Op {
         self.skipSpace();
@@ -424,6 +443,29 @@ test "% is floored modulo, at the precedence of * and /" {
     // Binds like * and /: tighter than +, left-associative among terms.
     try testing.expectApproxEqAbs(@as(f64, 8), (try evalAt("7 + 3 % 2 = 0", 0, 0)).v, 1e-12);
     try testing.expectApproxEqAbs(@as(f64, 4), (try evalAt("8 % 3 * 2 = 0", 0, 0)).v, 1e-12);
+}
+
+test "the dedicated minus sign U+2212 works wherever - does" {
+    // Unary, binary, and exponent positions.
+    try testing.expectApproxEqAbs(@as(f64, -3), (try evalAt("\u{2212}x = 0", 3, 0)).v, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, -1), (try evalAt("1 \u{2212} 2 = 0", 0, 0)).v, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, -4), (try evalAt("1 \u{2212} 2 \u{2212} 3 = 0", 0, 0)).v, 1e-12);
+    try testing.expectApproxEqAbs(@as(f64, 0.25), (try evalAt("2^\u{2212}2 = 0", 0, 0)).v, 1e-12);
+
+    // A scientific literal the way plotting software labels axes (`1e−5`).
+    // The constant is bit-identical to the ASCII spelling: the literal is
+    // respelled and re-parsed, never computed in pieces.
+    try testing.expectEqual(
+        (try evalAt("1.5e-3 = 0", 0, 0)).v,
+        (try evalAt("1.5e\u{2212}3 = 0", 0, 0)).v,
+    );
+
+    // And a whole relation pasted out of a rendered formula parses.
+    try testing.expectApproxEqAbs(
+        @as(f64, -2.0 + 1.0 / 9.0),
+        (try evalAt("\u{2212}2 + 3^\u{2212}2 = 0", 0, 0)).v,
+        1e-12,
+    );
 }
 
 test "the arity in the enum is the arity the parser enforces" {
