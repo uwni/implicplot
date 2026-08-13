@@ -19,5 +19,4 @@ exclude = [
   "manual-helpers.typ",
   "manual.pdf",
   "references.yml",
-  "make-thumbnail.sh",
 ]
