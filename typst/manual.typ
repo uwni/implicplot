@@ -221,14 +221,14 @@ boundary, which is the zero set of the corresponding equality and stays sharp
 at any zoom:
 
 #let g = "sin(x^2 - y^2) < sin(x + y) + cos(x*y)"
-#let g-edge = ip.contour(g, n: 120, x: (-4, 4), y: (-4, 4))
+#let g-edge = ip.contour(g, n: 150, x: (-4, 4), y: (-4, 4))
 
 #demo(```typ
 #let g = "sin(x^2 - y^2) < sin(x + y) + cos(x*y)"
-#let g-fill = ip.plot(g, size: (150, 150), x: (-4, 4), y: (-4, 4))
-#let g-edge = ip.contour(g, n: 120, x: (-4, 4), y: (-4, 4))
+#let g-fill = ip.plot(g, size: (500, 500), x: (-4, 4), y: (-4, 4))
+#let g-edge = ip.contour(g, n: 150, x: (-4, 4), y: (-4, 4))
 #box(width: 8cm, height: 8cm, {
-  fill-runs(g-fill, 150, 8cm)
+  fill-runs(g-fill, 500, 8cm)
   stroke-chains(g-edge.chains, (-4, 4), 8cm, weight: 0.5pt)
 })
 ```)
