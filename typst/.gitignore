@@ -1,4 +1,1 @@
 *.wasm
-*.pdf
-*.png
-!thumbnail.png
